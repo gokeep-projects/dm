@@ -130,7 +130,10 @@ jobs:
             prerelease="${{ inputs.prerelease }}"
           else
             tag="${GITHUB_REF_NAME}"
-            prerelease="false"
+            case "$tag" in
+              *test*|*alpha*|*beta*|*rc*) prerelease="true" ;;
+              *) prerelease="false" ;;
+            esac
           fi
 
           previous_tag="$(git tag --sort=-creatordate | grep -v "^${tag}$" | head -1 || true)"
