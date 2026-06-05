@@ -33,24 +33,39 @@ jobs:
           - target: x86_64-unknown-linux-musl
             arch: x86_64
             build_std: "0"
+            builder: zig
+            experimental: false
           - target: aarch64-unknown-linux-musl
             arch: arm64
             build_std: "0"
+            builder: zig
+            experimental: false
           - target: loongarch64-unknown-linux-musl
             arch: loongarch64
             build_std: "0"
+            builder: zig
+            experimental: false
           - target: mips-unknown-linux-musl
             arch: mips
             build_std: "1"
+            builder: cross
+            experimental: true
           - target: mipsel-unknown-linux-musl
             arch: mipsel
             build_std: "1"
+            builder: cross
+            experimental: true
           - target: mips64-unknown-linux-muslabi64
             arch: mips64
             build_std: "1"
+            builder: cross
+            experimental: true
           - target: mips64el-unknown-linux-muslabi64
             arch: mips64el
             build_std: "1"
+            builder: cross
+            experimental: true
+    continue-on-error: ${{ matrix.experimental }}
 
     steps:
       - name: Checkout
@@ -79,10 +94,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zip musl-tools
+
+      - name: Install cargo-zigbuild
+        if: matrix.builder == 'zig'
+        run: |
           cargo install cargo-zigbuild --locked
 
       - name: Setup Zig
+        if: matrix.builder == 'zig'
         uses: mlugg/setup-zig@v2
+
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Validate native target
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -94,7 +119,7 @@ jobs:
       - name: Build package
         env:
           PACKAGE_TARGETS: ${{ matrix.target }}
-          BUILD_WITH_ZIG: "1"
+          BUILD_WITH_ZIG: ${{ matrix.builder == 'zig' && '1' || '0' }}
           BUILD_STD: ${{ matrix.build_std }}
         run: ./package.sh
 
