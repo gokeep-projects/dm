@@ -1,0 +1,7 @@
+name = "system"
+description = "系统概览：主机/CPU/内存/磁盘/网络/进程"
+feature = "系统综合检查"
+example = "dm run sys"
+version = "2.0.0"
+author = "运维团队"
+category = "系统检查"

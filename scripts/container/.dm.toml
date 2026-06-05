@@ -1,0 +1,7 @@
+name = "container"
+description = "Docker：容器/镜像/状态"
+feature = "Docker容器"
+example = "dm run container"
+version = "2.0.0"
+author = "运维团队"
+category = "中间件"

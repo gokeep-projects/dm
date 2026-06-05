@@ -1,0 +1,143 @@
+const translations = {
+  zh: {
+    nav: {
+      dashboard: '仪表盘',
+      checks: '常规检查',
+      services: '服务管理',
+      scripts: '维护脚本',
+      maintenance: '维护记录',
+      docs: '维护文档',
+      help: '使用指南',
+    },
+    dashboard: {
+      title: '系统仪表盘',
+      health: '健康',
+      warning: '注意',
+      danger: '警告',
+      quickRun: '快速执行',
+      quickRunDesc: '选择脚本立即执行',
+      selectScript: '选择要执行的脚本...',
+      executing: '执行中...',
+      execute: '执行',
+      stop: '停止',
+      result: '执行结果',
+      scripts: '脚本总数',
+      executions: '执行次数',
+      success: '成功',
+      failure: '失败',
+      resources: '系统资源',
+      load: '系统负载',
+      network: '网络接口',
+      disks: '磁盘挂载',
+      info: '系统信息',
+      topProcesses: 'Top 进程',
+      recent: '最近执行',
+      clear: '清空',
+      actions: '快捷操作',
+      scriptList: '脚本列表',
+      checks: '常规检查',
+      refresh: '刷新数据',
+      guide: '使用指南',
+      host: '主机',
+      system: '系统',
+      kernel: '内核',
+      arch: '架构',
+      uptime: '运行',
+      processes: '进程',
+      updated: '更新',
+      autoRefresh: '自动刷新',
+    },
+    common: {
+      loading: '加载中...',
+      error: '错误',
+      success: '成功',
+      cancel: '取消',
+      confirm: '确认',
+      delete: '删除',
+      edit: '编辑',
+      save: '保存',
+      search: '搜索...',
+      noData: '暂无数据',
+      close: '关闭',
+    },
+  },
+  en: {
+    nav: {
+      dashboard: 'Dashboard',
+      checks: 'Checks',
+      services: 'Services',
+      scripts: 'Scripts',
+      maintenance: 'Maintenance',
+      docs: 'Documents',
+      help: 'Help',
+    },
+    dashboard: {
+      title: 'System Dashboard',
+      health: 'Healthy',
+      warning: 'Warning',
+      danger: 'Critical',
+      quickRun: 'Quick Run',
+      quickRunDesc: 'Select a script to execute',
+      selectScript: 'Select a script...',
+      executing: 'Executing...',
+      execute: 'Execute',
+      stop: 'Stop',
+      result: 'Result',
+      scripts: 'Scripts',
+      executions: 'Executions',
+      success: 'Success',
+      failure: 'Failure',
+      resources: 'System Resources',
+      load: 'System Load',
+      network: 'Network',
+      disks: 'Disks',
+      info: 'System Info',
+      topProcesses: 'Top Processes',
+      recent: 'Recent',
+      clear: 'Clear',
+      actions: 'Quick Actions',
+      scriptList: 'Script List',
+      checks: 'Checks',
+      refresh: 'Refresh',
+      guide: 'Guide',
+      host: 'Host',
+      system: 'System',
+      kernel: 'Kernel',
+      arch: 'Arch',
+      uptime: 'Uptime',
+      processes: 'Processes',
+      updated: 'Updated',
+      autoRefresh: 'Auto Refresh',
+    },
+    common: {
+      loading: 'Loading...',
+      error: 'Error',
+      success: 'Success',
+      cancel: 'Cancel',
+      confirm: 'Confirm',
+      delete: 'Delete',
+      edit: 'Edit',
+      save: 'Save',
+      search: 'Search...',
+      noData: 'No data',
+      close: 'Close',
+    },
+  },
+};
+
+export function t(key, lang = 'zh') {
+  const keys = key.split('.');
+  let result = translations[lang];
+  for (const k of keys) {
+    if (result && typeof result === 'object') {
+      result = result[k];
+    } else {
+      return key;
+    }
+  }
+  return result || key;
+}
+
+export function getLang() {
+  return localStorage.getItem('dm-lang') || 'zh';
+}

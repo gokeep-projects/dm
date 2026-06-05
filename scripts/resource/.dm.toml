@@ -1,0 +1,7 @@
+name = "resource"
+description = "硬件资源：CPU/内存/磁盘/Swap/IO"
+feature = "硬件资源详情"
+example = "dm run hardware"
+version = "2.0.0"
+author = "运维团队"
+category = "系统检查"

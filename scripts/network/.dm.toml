@@ -1,0 +1,7 @@
+name = "network"
+description = "网络诊断：网卡/端口/SSL/防火墙"
+feature = "网络诊断"
+example = "dm run network"
+version = "2.0.0"
+author = "运维团队"
+category = "网络"

@@ -1,0 +1,30 @@
+[package]
+name = "dm"
+version = "0.1.0"
+edition = "2021"
+description = "现场维护工具 - 脚本管理与执行平台"
+
+[[bin]]
+name = "dm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "cargo"] }
+clap_complete = "4"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rust-embed = { version = "8", features = ["include-exclude"] }
+mime_guess = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.30"
+anyhow = "1"
+futures-util = "0.3"
+colored = "2"
+tabled = "0.15"
+rusqlite = { version = "0.31", features = ["bundled"] }

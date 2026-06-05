@@ -1,0 +1,7 @@
+name = "smart-check"
+description = "智能综合检查：系统配置/服务状态/防火墙/日志/硬件，生成评分报告"
+feature = "智能全量体检"
+example = "dm run smart-check"
+version = "1.0.0"
+author = "运维团队"
+category = "系统检查"

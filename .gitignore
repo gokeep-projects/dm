@@ -1,0 +1,13 @@
+/target/
+/web/node_modules/
+/web/dist/
+/web/dist-prod/
+/web/dist.bak/
+/web/target/
+*.swp
+*.swo
+*~
+/.codegraph
+/output
+/.claude
+.DS_Store

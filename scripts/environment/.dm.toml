@@ -1,0 +1,7 @@
+name = "environment"
+description = "环境信息：系统/变量/软件/用户"
+feature = "环境与用户"
+example = "dm run env"
+version = "2.0.0"
+author = "运维团队"
+category = "系统检查"

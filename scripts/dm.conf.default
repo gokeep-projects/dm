@@ -1,0 +1,18 @@
+# DM 现场维护工具 — 默认配置
+# 安装后位于 ~/.dm/.dm.toml
+
+[server]
+# Web 服务端口
+port = 3399
+# 监听地址
+bind = "0.0.0.0"
+
+[log]
+# 日志存放目录（相对路径基于 ~/.dm/）
+dir = "logs"
+
+[scripts]
+# 脚本搜索路径（逗号分隔多个目录）
+# 执行 dm list / dm run 时自动扫描这些目录
+# 当前工作目录下的 scripts/ 优先
+dirs = ["~/.dm/scripts"]

@@ -1,0 +1,7 @@
+name = "service"
+description = "服务状态：分类/端口/异常/状态"
+feature = "服务状态"
+example = "dm run process"
+version = "2.0.0"
+author = "运维团队"
+category = "系统检查"

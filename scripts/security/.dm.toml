@@ -1,0 +1,7 @@
+name = "security"
+description = "系统安全策略概览：SELinux/AppArmor/防火墙/EVM/IMA/内核加固"
+feature = "安全策略综合检查"
+example = "dm run security"
+version = "1.0.0"
+author = "运维团队"
+category = "系统安全"

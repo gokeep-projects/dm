@@ -1,0 +1,12 @@
+#!/bin/bash
+R=$'\033[0m' B=$'\033[1m' D=$'\033[2m' CY=$'\033[36m' G=$'\033[32m' Y=$'\033[33m' RD=$'\033[31m' BL=$'\033[34m'
+strip_ansi() { echo -n "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+dw() { local plain=$(strip_ansi "$1"); local len=${#plain} w=0 i=0; while [ $i -lt $len ]; do local c="${plain:$i:1}"; local b=$(printf '%d' "'$c" 2>/dev/null); [ -z "$b" ] && w=$((w+1)) || { [ "$b" -lt 128 ] && w=$((w+1)) || w=$((w+2)); }; i=$((i+1)); done; echo $w; }
+pad() { local s="$1" t="$2"; local current=$(dw "$s"); if [ "$current" -gt "$t" ]; then local plain=$(strip_ansi "$s"); local tmp="" tw=0 i=0 len=${#plain}; while [ $i -lt $len ] && [ $tw -lt $((t-2)) ]; do local c="${plain:$i:1}"; local b=$(printf '%d' "'$c" 2>/dev/null); if [ -z "$b" ] || [ "$b" -lt 128 ]; then tw=$((tw+1)); else tw=$((tw+2)); fi; tmp+="$c"; i=$((i+1)); done; [ $i -lt $len ] && tmp+=".."; s="$tmp"; fi; local diff=$((t - $(dw "$s"))); [ "$diff" -lt 0 ] && diff=0; printf "%s" "$s"; local c=0; while [ "$c" -lt "$diff" ]; do printf " "; c=$((c+1)); done; }
+fmt_b() { local b=$1; [ "$b" -ge 1073741824 ] && { awk "BEGIN{printf \"%.1fGB\",$b/1073741824}"; return; }; [ "$b" -ge 1048576 ] && { echo "$((b/1048576))MB"; return; }; echo "$((b/1024))KB"; }
+top_border() { local s="  ┌"; for w in "$@"; do local i=0; while [ "$i" -lt "$w" ]; do s+="─"; i=$((i+1)); done; s+="┬"; done; echo "${s%┬}┐"; }
+mid_border() { local s="  ├"; for w in "$@"; do local i=0; while [ "$i" -lt "$w" ]; do s+="─"; i=$((i+1)); done; s+="┼"; done; echo "${s%┼}┤"; }
+bot_border() { local s="  └"; for w in "$@"; do local i=0; while [ "$i" -lt "$w" ]; do s+="─"; i=$((i+1)); done; s+="┴"; done; echo "${s%┴}┘"; }
+table_row() { local s="  │"; while [ $# -ge 2 ]; do s+="$(pad "$1" "$2")│"; shift 2; done; echo "$s"; }
+header() { local title="$1" w="${2:-76}"; local tdw=$(dw "$title"); local pad=$((w-2-tdw)); local l=$((pad/2)) r=$((pad-l)); [ $l -lt 0 ] && l=0; [ $r -lt 0 ] && r=0; echo -e "${B}${BL}╔$(printf '═%.0s' $(seq 1 $((w-2))))╗${R}"; printf "%s║" "${B}${BL}"; local i=0; while [ $i -lt $l ]; do printf " "; i=$((i+1)); done; printf "%s" "$title"; i=0; while [ $i -lt $r ]; do printf " "; i=$((i+1)); done; printf "║%s\n" "${R}"; echo -e "${B}${BL}╚$(printf '═%.0s' $(seq 1 $((w-2))))╝${R}"; echo ""; }
+get_cols() { local TW=$(tput cols 2>/dev/null || echo 120); local W=$((TW*80/100)); [ $W -lt 84 ] && W=84; [ $W -gt 180 ] && W=180; echo $W; }

@@ -1,0 +1,7 @@
+name = "log"
+description = "日志分析：Java/中间件/系统异常聚合，仅显示ERROR/WARN"
+feature = "日志异常聚合分析"
+example = "dm run log"
+version = "3.0.0"
+author = "运维团队"
+category = "日志管理"

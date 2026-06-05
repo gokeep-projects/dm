@@ -1,0 +1,7 @@
+name = "middleware"
+description = "中间件：Nginx/Redis/MySQL/Kafka/ES"
+feature = "中间件一览"
+example = "dm run middleware"
+version = "2.0.0"
+author = "运维团队"
+category = "中间件"
