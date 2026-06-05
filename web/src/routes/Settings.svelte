@@ -21,6 +21,8 @@
   let saving = $state(false);
   let saveMessage = $state('');
   let saveError = $state('');
+  let importingConfigs = $state(false);
+  let configImportInput = $state(null);
 
   async function load() {
     loading = true;
@@ -67,6 +69,52 @@
       language: 'zh',
       about: config.about,
     };
+  }
+
+  async function downloadConfigTemplate() {
+    saveError = '';
+    try {
+      const r = await fetch('/api/check-configs/template', { cache: 'no-store' });
+      if (!r.ok) throw new Error('模板下载失败');
+      const data = await r.json();
+      const blob = new Blob([JSON.stringify(data, null, 2) + '\n'], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'dm-check-config-template.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      saveError = e.message;
+    }
+  }
+
+  async function importCheckConfigs(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    importingConfigs = true;
+    saveMessage = '';
+    saveError = '';
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      const r = await fetch('/api/check-configs/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.status === 'error') {
+        saveError = d.message || '导入失败';
+      } else {
+        const extra = d.errors?.length ? `，${d.errors.length} 条配置有警告` : '';
+        saveMessage = `已导入 ${d.imported || 0} 个连接配置${extra}`;
+        setTimeout(() => saveMessage = '', 4000);
+      }
+    } catch (e) {
+      saveError = e.message || '导入失败';
+    }
+    importingConfigs = false;
+    event.target.value = '';
   }
 
   onMount(load);
@@ -149,6 +197,25 @@
       </div>
 
       <div class="settings-section">
+        <h3>连接配置导入</h3>
+        <div class="setting-rows">
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-label">常规检查连接配置</span>
+              <span class="setting-desc">ES、Redis、MySQL、Nginx、Keepalived、Java 服务等检查会从数据库读取这些配置。路径字段可留空，系统会自动推断。</span>
+            </div>
+            <div class="inline-actions">
+              <button class="reset-btn" onclick={downloadConfigTemplate}>下载模板</button>
+              <button class="save-btn secondary" onclick={() => configImportInput?.click()} disabled={importingConfigs}>
+                {importingConfigs ? '导入中...' : '导入 JSON'}
+              </button>
+              <input bind:this={configImportInput} class="hidden-file" type="file" accept="application/json,.json" onchange={importCheckConfigs} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h3>🎨 界面设置</h3>
         <div class="setting-rows">
           <div class="setting-row">
@@ -191,6 +258,7 @@
   .save-btn { padding: 8px 16px; background: var(--accent-primary); color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
   .save-btn:hover { background: var(--accent-primary-hover); }
   .save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .save-btn.secondary { background: linear-gradient(135deg, #0891b2, #2563eb); }
 
   .settings-grid { display: flex; flex-direction: column; gap: 20px; }
   .settings-section { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; padding: 20px; }
@@ -203,6 +271,8 @@
   .setting-input { width: 200px; padding: 8px 12px; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 13px; color: var(--text-primary); outline: none; }
   .setting-input:focus { border-color: var(--border-focus); }
   .setting-select { width: 200px; padding: 8px 12px; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 13px; color: var(--text-primary); outline: none; cursor: pointer; }
+  .inline-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .hidden-file { display: none; }
   .segmented { display: inline-flex; gap: 4px; padding: 4px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px; }
   .segmented button { min-height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
   .segmented button.active { background: var(--accent-primary); color: #fff; }

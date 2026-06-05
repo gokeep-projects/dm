@@ -205,4 +205,15 @@ pub enum CheckConfigAction {
         #[arg(value_name = "KEY=VALUE")]
         values: Vec<String>,
     },
+    /// 导入 JSON 检查连接配置
+    Import {
+        /// JSON 配置文件路径
+        file: std::path::PathBuf,
+    },
+    /// 输出 JSON 配置模板
+    Template {
+        /// 输出文件路径；不指定时输出到终端
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
 }

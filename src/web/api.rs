@@ -45,6 +45,21 @@ fn validate_non_empty(s: &str, max_len: usize) -> Result<(), StatusCode> {
     Ok(())
 }
 
+fn sanitize_service_name(name: &str) -> Result<String, StatusCode> {
+    let value = name.trim();
+    if value.is_empty() || value.len() > 128 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | ':'))
+    {
+        Ok(value.to_string())
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RuleImportPlan {
     imported: Vec<(String, serde_json::Value)>,
@@ -187,6 +202,7 @@ pub struct ServiceLogsQuery {
     pub pid: Option<u32>,
     pub path: Option<String>,
     pub category: Option<String>,
+    pub process: Option<String>,
 }
 
 const HEALTH_CHECK_IDS: &[&str] = &[
@@ -811,6 +827,162 @@ pub async fn update_check_config(
     })))
 }
 
+const CONFIGURABLE_CHECK_IDS: &[&str] = &[
+    "elasticsearch",
+    "redis",
+    "nginx",
+    "keepalived",
+    "mysql",
+    "java-service",
+];
+
+fn check_config_template_value() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "description": "DM 常规检查连接配置导入模板。只需要填写关键连接信息；config_path/data_path/log_path/program_path 可以留空，系统会根据进程、systemd、命令行参数和配置文件自动推断。",
+        "configs": {
+            "elasticsearch": {
+                "url": "http://127.0.0.1:9200",
+                "host": "127.0.0.1",
+                "port": "9200",
+                "username": "",
+                "password": "",
+                "config_path": "",
+                "data_path": "",
+                "log_path": "",
+                "program_path": ""
+            },
+            "redis": {
+                "host": "127.0.0.1",
+                "port": "6379",
+                "password": "",
+                "config_path": "",
+                "data_path": "",
+                "log_path": "",
+                "program_path": ""
+            },
+            "nginx": {
+                "config_path": "",
+                "log_path": "",
+                "program_path": ""
+            },
+            "keepalived": {
+                "config_path": "",
+                "log_path": "",
+                "program_path": ""
+            },
+            "mysql": {
+                "host": "127.0.0.1",
+                "port": "3306",
+                "username": "root",
+                "password": "",
+                "config_path": "",
+                "data_path": "",
+                "log_path": "",
+                "program_path": ""
+            },
+            "java-service": {
+                "service_prefix": "",
+                "log_path": "",
+                "program_path": ""
+            }
+        }
+    })
+}
+
+fn normalize_check_config_import_payload(
+    payload: &serde_json::Value,
+) -> (Vec<(String, serde_json::Value)>, Vec<String>, Vec<String>) {
+    let source = payload
+        .get("configs")
+        .and_then(|v| v.as_object())
+        .or_else(|| payload.as_object());
+
+    let Some(source) = source else {
+        return (
+            Vec::new(),
+            Vec::new(),
+            vec!["导入文件必须是 JSON 对象，或包含 configs 对象".to_string()],
+        );
+    };
+
+    let mut imported = Vec::new();
+    let mut skipped = Vec::new();
+    let mut errors = Vec::new();
+    for (check_id, value) in source {
+        if check_id == "version" || check_id == "description" {
+            continue;
+        }
+        if !CONFIGURABLE_CHECK_IDS.contains(&check_id.as_str()) {
+            skipped.push(check_id.to_string());
+            continue;
+        }
+        if !value.is_object() {
+            errors.push(format!("{} 配置必须是 JSON 对象", check_id));
+            continue;
+        }
+        if serde_json::to_string(value).unwrap_or_default().len() > 64 * 1024 {
+            errors.push(format!("{} 配置过大，已拒绝", check_id));
+            continue;
+        }
+        imported.push((check_id.to_string(), value.clone()));
+    }
+
+    (imported, skipped, errors)
+}
+
+pub async fn check_config_template() -> Json<serde_json::Value> {
+    Json(check_config_template_value())
+}
+
+pub async fn import_check_configs(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let (mut imported, skipped, errors) = normalize_check_config_import_payload(&payload);
+    if imported.is_empty() && !errors.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "imported": 0,
+            "skipped": skipped,
+            "errors": errors,
+            "message": "未导入任何配置",
+        })));
+    }
+
+    let mut saved = Vec::new();
+    for (check_id, mut value) in imported.drain(..) {
+        if value
+            .get("password")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            if let Some(existing) = state.db.get_check_config(&check_id) {
+                if let Some(password) = existing.value.get("password").and_then(|v| v.as_str()) {
+                    if !password.is_empty() {
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert("password".to_string(), serde_json::json!(password));
+                        }
+                    }
+                }
+            }
+        }
+        if state.db.save_check_config(&check_id, &value) {
+            saved.push(check_id);
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "imported": saved.len(),
+        "check_ids": saved,
+        "skipped": skipped,
+        "errors": errors,
+        "message": format!("已导入 {} 个检查连接配置，后续检查会直接读取数据库配置", saved.len()),
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateDocRequest {
     pub id: String,
@@ -1107,13 +1279,7 @@ pub async fn service_action(
     if !allowed.contains(&req.action.as_str()) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe_name.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let safe_name = sanitize_service_name(&name)?;
 
     let output = std::process::Command::new("systemctl")
         .args([&req.action, &safe_name])
@@ -3113,37 +3279,57 @@ pub async fn get_service_logs(
     Query(query): Query<ServiceLogsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     validate_non_empty(&name, 128)?;
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe_name.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+    let safe_name = sanitize_service_name(&name)?;
+    let process_name = query
+        .process
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(|| service_process_candidate(&safe_name));
+    let mut unit_candidates = vec![safe_name.clone()];
+    if !safe_name.ends_with(".service")
+        && !safe_name.ends_with(".scope")
+        && !safe_name.ends_with(".socket")
+        && !safe_name.ends_with(".timer")
+    {
+        unit_candidates.push(format!("{}.service", safe_name));
     }
 
     let mut parts = Vec::new();
     let mut sources = Vec::new();
     let mut tried = Vec::new();
+
+    for unit in &unit_candidates {
+        let label = format!("systemd-unit:{}", unit);
+        tried.push(label.clone());
+        if let Ok(output) = std::process::Command::new("journalctl")
+            .args(["-u", unit, "-n", "160", "--no-pager"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !text.is_empty() && !text.contains("No journal files were found") {
+                sources.push(label.clone());
+                parts.push(format!("===== {} =====\n{}", label, text));
+            }
+        }
+    }
+
     for (label, args) in [
         (
-            "systemd-unit",
-            vec!["-u", safe_name.as_str(), "-n", "160", "--no-pager"],
-        ),
-        (
             "journal-comm",
-            vec!["_COMM", safe_name.as_str(), "-n", "120", "--no-pager"],
+            vec!["_COMM", process_name.as_str(), "-n", "120", "--no-pager"],
         ),
         (
             "journal-tag",
-            vec!["-t", safe_name.as_str(), "-n", "120", "--no-pager"],
+            vec!["-t", process_name.as_str(), "-n", "120", "--no-pager"],
         ),
     ] {
-        tried.push(label.to_string());
+        tried.push(format!("{}:{}", label, process_name));
         if let Ok(output) = std::process::Command::new("journalctl").args(args).output() {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !text.is_empty() && !text.contains("No journal files were found") {
-                sources.push(label.to_string());
-                parts.push(format!("===== {} =====\n{}", label, text));
+                sources.push(format!("{}:{}", label, process_name));
+                parts.push(format!("===== {}:{} =====\n{}", label, process_name, text));
             }
         }
     }
@@ -3166,6 +3352,7 @@ pub async fn get_service_logs(
         query.pid,
         query.path.as_deref(),
         query.category.as_deref(),
+        Some(&process_name),
     );
     for path in inferred_paths {
         tried.push(path.clone());
@@ -3208,15 +3395,42 @@ fn push_log_candidate(paths: &mut Vec<String>, value: impl Into<String>) {
     paths.push(value);
 }
 
+fn service_process_candidate(name: &str) -> String {
+    let base = name
+        .trim()
+        .trim_end_matches(".service")
+        .trim_end_matches(".scope")
+        .trim_end_matches(".socket")
+        .trim_end_matches(".timer");
+    if base.contains('@') {
+        base.split('@').next().unwrap_or(base).to_string()
+    } else {
+        base.to_string()
+    }
+}
+
 fn infer_service_log_paths(
     name: &str,
     pid: Option<u32>,
     cmd: Option<&str>,
     category: Option<&str>,
+    process_name: Option<&str>,
 ) -> Vec<String> {
     let mut paths = Vec::new();
-    let name = name.trim();
+    let name = service_process_candidate(name);
+    let process_name = process_name
+        .map(service_process_candidate)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| name.clone());
     let category_lower = category.unwrap_or_default().to_lowercase();
+    if name != process_name {
+        push_log_candidate(&mut paths, format!("/var/log/{}.log", process_name));
+        push_log_candidate(
+            &mut paths,
+            format!("/var/log/{}/{}.log", process_name, process_name),
+        );
+        push_log_candidate(&mut paths, format!("/var/log/{}/error.log", process_name));
+    }
     for path in [
         format!("/var/log/{}.log", name),
         format!("/var/log/{}/{}.log", name, name),
@@ -3300,6 +3514,7 @@ fn infer_service_log_paths(
         if let Ok(link) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
             let cwd = link.display().to_string();
             push_log_candidate(&mut paths, format!("{}/logs/{}.log", cwd, name));
+            push_log_candidate(&mut paths, format!("{}/logs/{}.log", cwd, process_name));
             push_log_candidate(&mut paths, format!("{}/logs/error.log", cwd));
         }
     }
@@ -3336,13 +3551,7 @@ pub async fn check_service_health(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     validate_non_empty(&name, 128)?;
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe_name.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let safe_name = sanitize_service_name(&name)?;
 
     let mut health_info = serde_json::json!({
         "service": safe_name,
@@ -3685,6 +3894,42 @@ mod tests {
         let plan = normalize_rule_import_payload(&payload, &catalog);
         assert!(plan.imported.is_empty());
         assert_eq!(plan.errors.len(), 2);
+    }
+
+    #[test]
+    fn check_config_import_accepts_configs_object_and_skips_unknown() {
+        let payload = serde_json::json!({
+            "version": 1,
+            "configs": {
+                "elasticsearch": {
+                    "url": "http://10.0.0.10:9200",
+                    "username": "elastic"
+                },
+                "redis": {
+                    "host": "10.0.0.11",
+                    "port": "6379"
+                },
+                "unknown": {
+                    "host": "127.0.0.1"
+                }
+            }
+        });
+        let (imported, skipped, errors) = normalize_check_config_import_payload(&payload);
+        assert_eq!(imported.len(), 2);
+        assert_eq!(imported[0].0, "elasticsearch");
+        assert_eq!(imported[1].0, "redis");
+        assert_eq!(skipped, vec!["unknown".to_string()]);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn service_name_sanitizer_keeps_systemd_unit_chars() {
+        assert_eq!(
+            sanitize_service_name("redis@6379.service").unwrap(),
+            "redis@6379.service"
+        );
+        assert!(sanitize_service_name("../redis").is_err());
+        assert!(sanitize_service_name("redis;rm").is_err());
     }
 
     #[test]

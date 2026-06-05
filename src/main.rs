@@ -57,6 +57,8 @@ async fn main() {
             CheckConfigAction::Set { check_id, values } => {
                 cli::check_config::set(&check_id, &values)
             }
+            CheckConfigAction::Import { file } => cli::check_config::import(&file),
+            CheckConfigAction::Template { output } => cli::check_config::template(output),
         },
         Some(Commands::Completions { shell }) => {
             let mut cmd = Cli::command();

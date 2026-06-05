@@ -1,0 +1,223 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        default: "v0.1.0"
+      prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+            build_std: "0"
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            build_std: "0"
+          - target: loongarch64-unknown-linux-musl
+            arch: loongarch64
+            build_std: "0"
+          - target: mips-unknown-linux-musl
+            arch: mips
+            build_std: "1"
+          - target: mipsel-unknown-linux-musl
+            arch: mipsel
+            build_std: "1"
+          - target: mips64-unknown-linux-muslabi64
+            arch: mips64
+            build_std: "1"
+          - target: mips64el-unknown-linux-muslabi64
+            arch: mips64el
+            build_std: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip musl-tools
+          cargo install cargo-zigbuild --locked
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Validate native target
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          npm run build --prefix web
+          cargo fmt --check
+          cargo test --locked
+
+      - name: Build package
+        env:
+          PACKAGE_TARGETS: ${{ matrix.target }}
+          BUILD_WITH_ZIG: "1"
+          BUILD_STD: ${{ matrix.build_std }}
+        run: ./package.sh
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dm-${{ matrix.target }}
+          path: target/packages/dm-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag_name }}"
+            prerelease="${{ inputs.prerelease }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            prerelease="false"
+          fi
+
+          previous_tag="$(git tag --sort=-creatordate | grep -v "^${tag}$" | head -1 || true)"
+          if [ -n "$previous_tag" ]; then
+            range="${previous_tag}..HEAD"
+          else
+            range="HEAD"
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "previous_tag=$previous_tag"
+            echo "range=$range"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure dispatch tag exists
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "$tag"
+          fi
+
+      - name: Generate release notes
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          previous_tag="${{ steps.meta.outputs.previous_tag }}"
+          range="${{ steps.meta.outputs.range }}"
+
+          {
+            echo "# DM ${tag}"
+            echo
+            echo "本次发布自动构建 Linux musl 静态二进制包，产物不依赖 glibc 等系统动态库。"
+            echo
+            echo "## 下载包"
+            echo
+            for file in dist/*.zip; do
+              name="$(basename "$file")"
+              case "$name" in
+                *x86_64*) arch="x86_64" ;;
+                *aarch64*) arch="arm64" ;;
+                *loongarch64*) arch="loongarch64" ;;
+                *mips64el*) arch="mips64el" ;;
+                *mips64*) arch="mips64" ;;
+                *mipsel*) arch="mipsel" ;;
+                *mips*) arch="mips" ;;
+                *) arch="unknown" ;;
+              esac
+              echo "- ${arch}: \`${name}\`"
+            done
+            echo
+            echo "## 实现的功能"
+            echo
+            git log --no-merges --pretty=format:'- %s' "$range" \
+              | grep -Ei '^(feat|feature|新增|add|实现|支持)' \
+              || echo "- 本次提交未使用功能类提交前缀，详见变更记录。"
+            echo
+            echo
+            echo "## 修复的问题"
+            echo
+            git log --no-merges --pretty=format:'- %s' "$range" \
+              | grep -Ei '^(fix|bugfix|修复|解决)' \
+              || echo "- 本次提交未使用修复类提交前缀，详见变更记录。"
+            echo
+            echo
+            echo "## 变更记录"
+            echo
+            if [ -n "$previous_tag" ]; then
+              echo "范围：\`${previous_tag}..${tag}\`"
+            else
+              echo "范围：首次发布"
+            fi
+            echo
+            git log --no-merges --pretty=format:'- %h %s' "$range" || true
+          } > release-notes.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: DM ${{ steps.meta.outputs.tag }}
+          body_path: release-notes.md
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: dist/*.zip

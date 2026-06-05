@@ -6,6 +6,7 @@ pub struct ServiceInfo {
     pub index: usize,
     pub pid: u32,
     pub name: String,
+    pub process_name: String,
     pub process_path: String,
     pub listen_ports: Vec<String>,
     pub status: String,
@@ -22,6 +23,34 @@ struct ProcessSnapshot {
     cmd: String,
     cpu_usage: f32,
     memory_mb: f64,
+}
+
+fn clean_unit_name(value: &str) -> Option<String> {
+    let unit = value.trim().trim_matches('"').trim_matches('\'');
+    if unit.is_empty() || unit == "-" {
+        return None;
+    }
+    if unit.ends_with(".service")
+        || unit.ends_with(".scope")
+        || unit.ends_with(".timer")
+        || unit.ends_with(".socket")
+    {
+        Some(unit.to_string())
+    } else {
+        None
+    }
+}
+
+fn unit_display_name(unit: &str, fallback: &str) -> String {
+    if unit.trim().is_empty() {
+        return fallback.to_string();
+    }
+    unit.trim()
+        .trim_end_matches(".service")
+        .trim_end_matches(".scope")
+        .trim_end_matches(".timer")
+        .trim_end_matches(".socket")
+        .to_string()
 }
 
 fn classify_service(name: &str, cmd: &str) -> (u8, String) {
@@ -179,6 +208,63 @@ fn collect_listen_port_index() -> HashMap<u32, Vec<String>> {
         .collect()
 }
 
+fn collect_systemd_unit_index() -> HashMap<u32, String> {
+    let mut index = HashMap::new();
+
+    if let Some(out) = crate::checks::common::shell_output(
+        "systemctl show --all --property=Id,MainPID,ControlPID --value '*' 2>/dev/null",
+    ) {
+        let mut current_unit: Option<String> = None;
+        for line in out.lines() {
+            if let Some(unit) = clean_unit_name(line) {
+                current_unit = Some(unit);
+                continue;
+            }
+            let Ok(pid) = line.trim().parse::<u32>() else {
+                continue;
+            };
+            if pid > 0 {
+                if let Some(unit) = &current_unit {
+                    index.entry(pid).or_insert_with(|| unit.clone());
+                }
+            }
+        }
+    }
+
+    for proc in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let pid = proc
+            .file_name()
+            .to_string_lossy()
+            .parse::<u32>()
+            .ok()
+            .unwrap_or(0);
+        if pid == 0 || index.contains_key(&pid) {
+            continue;
+        }
+        let cgroup_path = proc.path().join("cgroup");
+        let Ok(content) = std::fs::read_to_string(cgroup_path) else {
+            continue;
+        };
+        if let Some(unit) = infer_unit_from_cgroup(&content) {
+            index.insert(pid, unit);
+        }
+    }
+
+    index
+}
+
+fn infer_unit_from_cgroup(content: &str) -> Option<String> {
+    for line in content.lines() {
+        for raw in line.split('/') {
+            let decoded = raw.replace("\\x2d", "-");
+            if let Some(unit) = clean_unit_name(&decoded) {
+                return Some(unit);
+            }
+        }
+    }
+    None
+}
+
 fn get_listen_ports(pid: u32, port_index: &HashMap<u32, Vec<String>>) -> Vec<String> {
     port_index.get(&pid).cloned().unwrap_or_default()
 }
@@ -216,6 +302,7 @@ fn process_snapshot() -> Vec<ProcessSnapshot> {
 
 pub fn check() -> CheckResult {
     let port_index = collect_listen_port_index();
+    let unit_index = collect_systemd_unit_index();
 
     let mut service_map: std::collections::HashMap<String, ServiceInfo> =
         std::collections::HashMap::new();
@@ -223,6 +310,17 @@ pub fn check() -> CheckResult {
 
     for proc in process_snapshot() {
         let (priority, category) = classify_service(&proc.name, &proc.cmd);
+        let unit = unit_index.get(&proc.pid).cloned();
+        let service_key = unit.clone().unwrap_or_else(|| proc.name.clone());
+        let display_name = unit
+            .as_deref()
+            .map(|u| unit_display_name(u, &proc.name))
+            .unwrap_or_else(|| proc.name.clone());
+        let process_path = if let Some(unit) = unit.as_deref() {
+            format!("{} | {}", unit, proc.cmd)
+        } else {
+            proc.cmd.clone()
+        };
 
         let ports = get_listen_ports(proc.pid, &port_index);
 
@@ -230,9 +328,12 @@ pub fn check() -> CheckResult {
             continue;
         }
 
-        if let Some(existing) = service_map.get_mut(&proc.name) {
+        if let Some(existing) = service_map.get_mut(&service_key) {
             existing.cpu_usage += proc.cpu_usage;
             existing.memory_mb += proc.memory_mb;
+            if existing.pid == 0 || proc.pid < existing.pid {
+                existing.pid = proc.pid;
+            }
             for port in ports {
                 if !existing.listen_ports.contains(&port) {
                     existing.listen_ports.push(port);
@@ -241,12 +342,13 @@ pub fn check() -> CheckResult {
         } else {
             index += 1;
             service_map.insert(
-                proc.name.clone(),
+                service_key,
                 ServiceInfo {
                     index,
                     pid: proc.pid,
-                    name: proc.name,
-                    process_path: proc.cmd,
+                    name: display_name,
+                    process_name: proc.name,
+                    process_path,
                     listen_ports: ports,
                     status: "运行中".to_string(),
                     cpu_usage: proc.cpu_usage,
@@ -324,6 +426,7 @@ pub fn check() -> CheckResult {
             s.index.to_string(),
             s.pid.to_string(),
             s.name.clone(),
+            s.process_name.clone(),
             s.process_path.clone(),
             ports_str,
             format!("{} {}", status_icon, s.status),
@@ -343,6 +446,7 @@ pub fn check() -> CheckResult {
                     "#".to_string(),
                     "PID".to_string(),
                     "服务名".to_string(),
+                    "进程".to_string(),
                     "进程路径".to_string(),
                     "端口".to_string(),
                     "状态".to_string(),
@@ -366,5 +470,28 @@ pub fn check() -> CheckResult {
         duration_ms: 0,
         status: CheckStatus::Ok,
         sections,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infers_systemd_unit_from_cgroup() {
+        let content = "0::/system.slice/nginx.service\n";
+        assert_eq!(
+            infer_unit_from_cgroup(content).as_deref(),
+            Some("nginx.service")
+        );
+    }
+
+    #[test]
+    fn unit_display_name_removes_suffix() {
+        assert_eq!(
+            unit_display_name("redis-server.service", "redis"),
+            "redis-server"
+        );
+        assert_eq!(unit_display_name("", "java"), "java");
     }
 }

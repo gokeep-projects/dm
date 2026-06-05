@@ -103,6 +103,11 @@ pub fn build_router(config: Config) -> Router {
         .route("/api/checks", get(api::list_checks))
         .route("/api/checks/export", get(api::export_checks))
         .route("/api/checks/:id", get(api::run_check))
+        .route("/api/check-configs/import", post(api::import_check_configs))
+        .route(
+            "/api/check-configs/template",
+            get(api::check_config_template),
+        )
         .route(
             "/api/check-configs/:id",
             get(api::get_check_config).put(api::update_check_config),

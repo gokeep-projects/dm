@@ -6,27 +6,27 @@ use std::path::PathBuf;
 pub fn check() -> CheckResult {
     let cfg = load_endpoint_config("elasticsearch");
     let base = cfg.base_url("http", "127.0.0.1", "9200");
-    let config_path = configured_or_first(
+    let es_processes = process_rows(&["elasticsearch", "org.elasticsearch.bootstrap"]);
+    let process_cmds: Vec<String> = es_processes
+        .iter()
+        .filter_map(|row| row.get(6).cloned())
+        .collect();
+    let config_path = infer_config_path(
         &cfg.config_path,
+        &process_cmds,
         &[
             "/etc/elasticsearch/elasticsearch.yml",
             "/usr/local/etc/elasticsearch/elasticsearch.yml",
             "/opt/elasticsearch/config/elasticsearch.yml",
         ],
     );
-    let log_path = configured_or_first(
-        &cfg.log_path,
-        &[
-            "/var/log/elasticsearch/elasticsearch.log",
-            "/opt/elasticsearch/logs/elasticsearch.log",
-        ],
-    );
-    let data_path = configured_or_first(
-        &cfg.data_path,
-        &["/var/lib/elasticsearch", "/opt/elasticsearch/data"],
-    );
+    let config_text = config_path
+        .as_ref()
+        .and_then(|path| read_file_limited(path, 64 * 1024));
+    let data_path = infer_data_path(&cfg.data_path, &process_cmds, config_text.as_deref());
+    let log_path = infer_log_path(&cfg.log_path, &process_cmds, config_text.as_deref());
     let program_path = if cfg.program_path.trim().is_empty() {
-        find_command("elasticsearch")
+        find_command("elasticsearch").or_else(|| infer_program_path(&process_cmds))
     } else {
         Some(cfg.program_path.clone())
     };
@@ -137,8 +137,23 @@ pub fn check() -> CheckResult {
         version: "1.0.0".to_string(),
         timestamp: String::new(),
         duration_ms: 0,
-        status: status_from_bool(connected),
+        status: es_check_status(connected, health.as_ref()),
         sections,
+    }
+}
+
+fn es_check_status(connected: bool, health: Option<&Value>) -> CheckStatus {
+    if !connected {
+        return CheckStatus::Warn;
+    }
+    match health
+        .and_then(|h| h["status"].as_str())
+        .unwrap_or("unknown")
+    {
+        "green" => CheckStatus::Ok,
+        "yellow" => CheckStatus::Warn,
+        "red" => CheckStatus::Error,
+        _ => CheckStatus::Warn,
     }
 }
 
@@ -203,6 +218,152 @@ fn configured_or_first(value: &str, defaults: &[&str]) -> Option<PathBuf> {
         return Some(PathBuf::from(value));
     }
     first_existing(defaults)
+}
+
+fn infer_config_path(value: &str, cmds: &[String], defaults: &[&str]) -> Option<PathBuf> {
+    if !value.trim().is_empty() {
+        return Some(PathBuf::from(value));
+    }
+    for cmd in cmds {
+        if let Some(path) =
+            es_cmd_setting(cmd, "path.conf").or_else(|| es_cmd_setting(cmd, "default.path.conf"))
+        {
+            let path = PathBuf::from(path);
+            return Some(if path.is_dir() {
+                path.join("elasticsearch.yml")
+            } else {
+                path
+            });
+        }
+        for token in cmd.split_whitespace() {
+            let token = token.trim_matches('"').trim_matches('\'');
+            if token.ends_with("elasticsearch.yml") || token.ends_with("elasticsearch.yaml") {
+                return Some(PathBuf::from(token));
+            }
+        }
+    }
+    configured_or_first("", defaults)
+}
+
+fn infer_data_path(value: &str, cmds: &[String], config: Option<&str>) -> Option<PathBuf> {
+    if !value.trim().is_empty() {
+        return Some(PathBuf::from(value));
+    }
+    for cmd in cmds {
+        if let Some(path) =
+            es_cmd_setting(cmd, "path.data").or_else(|| es_cmd_setting(cmd, "default.path.data"))
+        {
+            return Some(PathBuf::from(path));
+        }
+    }
+    config
+        .and_then(|text| es_config_setting(text, "path.data"))
+        .map(PathBuf::from)
+        .or_else(|| configured_or_first("", &["/var/lib/elasticsearch", "/opt/elasticsearch/data"]))
+}
+
+fn infer_log_path(value: &str, cmds: &[String], config: Option<&str>) -> Option<PathBuf> {
+    if !value.trim().is_empty() {
+        return Some(PathBuf::from(value));
+    }
+    let mut dirs = Vec::new();
+    for cmd in cmds {
+        if let Some(path) =
+            es_cmd_setting(cmd, "path.logs").or_else(|| es_cmd_setting(cmd, "default.path.logs"))
+        {
+            dirs.push(PathBuf::from(path));
+        }
+    }
+    if let Some(path) = config.and_then(|text| es_config_setting(text, "path.logs")) {
+        dirs.push(PathBuf::from(path));
+    }
+    dirs.push(PathBuf::from("/var/log/elasticsearch"));
+    dirs.push(PathBuf::from("/opt/elasticsearch/logs"));
+
+    for dir in dirs {
+        if dir.is_file() {
+            return Some(dir);
+        }
+        for name in ["elasticsearch.log", "gc.log"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut logs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .and_then(|v| v.to_str())
+                            .map(|v| v.eq_ignore_ascii_case("log"))
+                            .unwrap_or(false)
+                })
+                .collect();
+            logs.sort();
+            if let Some(path) = logs.into_iter().next() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn infer_program_path(cmds: &[String]) -> Option<String> {
+    cmds.iter().find_map(|cmd| {
+        cmd.split_whitespace()
+            .next()
+            .filter(|token| token.contains("elasticsearch"))
+            .map(|token| token.trim_matches('"').trim_matches('\'').to_string())
+    })
+}
+
+fn es_cmd_setting(cmd: &str, key: &str) -> Option<String> {
+    let prefixes = [
+        format!("-E{}=", key),
+        format!("-Des.{}=", key),
+        format!("-Des.default.{}=", key),
+        format!("--{}=", key),
+    ];
+    for token in cmd.split_whitespace() {
+        let token = token.trim_matches('"').trim_matches('\'');
+        for prefix in &prefixes {
+            if let Some(value) = token.strip_prefix(prefix) {
+                if !value.trim().is_empty() {
+                    return Some(value.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn es_config_setting(config: &str, key: &str) -> Option<String> {
+    for raw in config.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        let Some((left, right)) = line.split_once(':') else {
+            continue;
+        };
+        if left.trim() == key {
+            let value = right
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('[')
+                .trim_matches(']')
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn json_summary_section(

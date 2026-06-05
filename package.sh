@@ -12,25 +12,62 @@ echo "[1/5] 构建前端..."
 echo "[OK] 前端构建完成"
 echo ""
 
-TARGETS=(
+DEFAULT_TARGETS=(
   "x86_64-unknown-linux-musl"
   "aarch64-unknown-linux-musl"
+  "loongarch64-unknown-linux-musl"
+  "mips-unknown-linux-musl"
+  "mipsel-unknown-linux-musl"
+  "mips64-unknown-linux-muslabi64"
+  "mips64el-unknown-linux-muslabi64"
 )
+
+if [ -n "${PACKAGE_TARGETS:-}" ]; then
+  # shellcheck disable=SC2206
+  TARGETS=(${PACKAGE_TARGETS})
+else
+  TARGETS=("${DEFAULT_TARGETS[@]}")
+fi
 
 target_dir_for() {
   local target="$1"
   if [ "$target" = "aarch64-unknown-linux-musl" ]; then
     echo "target/cross-aarch64"
+  elif [ "$target" != "x86_64-unknown-linux-musl" ]; then
+    echo "target/cross-$target"
   else
     echo "target"
   fi
 }
 
+rustup_knows_target() {
+  local target="$1"
+  rustup target list | awk '{print $1}' | grep -qx "$target"
+}
+
+target_needs_build_std() {
+  local target="$1"
+  ! rustup_knows_target "$target"
+}
+
 echo "[2/5] 检查 Rust musl 目标..."
 for target in "${TARGETS[@]}"; do
+  if ! rustc --print target-list | grep -q "^${target}$"; then
+    echo "[FAIL] 当前 rustc 不支持目标: $target"
+    exit 1
+  fi
+
   if ! rustup target list --installed | grep -q "^${target}$"; then
-    echo "安装目标: $target"
-    rustup target add "$target"
+    if rustup_knows_target "$target"; then
+      echo "安装目标: $target"
+      rustup target add "$target"
+    elif target_needs_build_std "$target"; then
+      echo "目标 $target 未提供预编译 rust-std，使用 nightly build-std 构建"
+      rustup toolchain install nightly --component rust-src
+    else
+      echo "[FAIL] 目标 $target 未提供预编译 rust-std，请设置 BUILD_STD=1 并安装可用交叉链接器"
+      exit 1
+    fi
   fi
 done
 echo "[OK] 工具链检查完成"
@@ -40,10 +77,22 @@ build_target() {
   local target="$1"
   echo "  构建 $target..."
   local static_flags="-C target-feature=+crt-static ${RUSTFLAGS:-}"
+  local build_std_args=()
+  local cargo_toolchain=()
+
+  if [ "${BUILD_STD:-0}" = "1" ] || target_needs_build_std "$target"; then
+    build_std_args=(-Z build-std=std,panic_abort)
+    cargo_toolchain=(+nightly)
+  fi
+
   if [ "$target" = "x86_64-unknown-linux-musl" ]; then
     RUSTFLAGS="$static_flags" \
       CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-musl-gcc}" \
-      cargo build --release --target "$target"
+      cargo "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
+  elif [ "${BUILD_WITH_ZIG:-0}" = "1" ] && command -v cargo-zigbuild >/dev/null 2>&1; then
+    RUSTFLAGS="$static_flags" \
+      CARGO_TARGET_DIR="$(target_dir_for "$target")" \
+      cargo "${cargo_toolchain[@]}" zigbuild --release --target "$target" "${build_std_args[@]}"
   elif command -v cross >/dev/null 2>&1; then
     if command -v docker >/dev/null 2>&1 && ! docker info >/dev/null 2>&1; then
       echo "    Docker daemon 未运行，尝试启动..."
@@ -55,9 +104,11 @@ build_target() {
     fi
     RUSTFLAGS="$static_flags" \
       CARGO_TARGET_DIR="$(target_dir_for "$target")" \
-      cross build --release --target "$target"
+      cross "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
   else
-    RUSTFLAGS="$static_flags" cargo build --release --target "$target"
+    RUSTFLAGS="$static_flags" \
+      CARGO_TARGET_DIR="$(target_dir_for "$target")" \
+      cargo "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
   fi
 }
 

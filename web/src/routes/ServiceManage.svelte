@@ -44,12 +44,13 @@
             index: r[0],
             pid: r[1],
             name: r[2],
-            path: r[3],
-            ports: r[4],
-            status: r[5],
-            cpu: r[6],
-            memory: r[7],
-            category: r[8],
+            process: r[3],
+            path: r[4],
+            ports: r[5],
+            status: r[6],
+            cpu: r[7],
+            memory: r[8],
+            category: r[9],
           }));
         }
       }
@@ -139,6 +140,7 @@
     }
     return [
       s.name,
+      s.process,
       s.pid,
       s.path,
       s.ports,
@@ -167,6 +169,7 @@
     try {
       const params = new URLSearchParams();
       if (service?.pid) params.set('pid', service.pid);
+      if (service?.process) params.set('process', service.process);
       if (service?.path) params.set('path', service.path);
       if (service?.category) params.set('category', service.category);
       const qs = params.toString();
@@ -312,6 +315,7 @@
           <col class="col-index" />
           <col class="col-pid" />
           <col class="col-name" />
+          <col class="col-process" />
           <col class="col-path" />
           <col class="col-ports" />
           <col class="col-status" />
@@ -325,6 +329,7 @@
             <th>#</th>
             <th><button class="th-sort" onclick={() => changeSort('pid')}>PID{sortMark('pid')}</button></th>
             <th><button class="th-sort" onclick={() => changeSort('name')}>服务名{sortMark('name')}</button></th>
+            <th><button class="th-sort" onclick={() => changeSort('process')}>进程{sortMark('process')}</button></th>
             <th><button class="th-sort" onclick={() => changeSort('path')}>进程路径{sortMark('path')}</button></th>
             <th><button class="th-sort" onclick={() => changeSort('ports')}>端口{sortMark('ports')}</button></th>
             <th><button class="th-sort" onclick={() => changeSort('status')}>状态{sortMark('status')}</button></th>
@@ -340,6 +345,7 @@
               <td class="cell-index">{s.index}</td>
               <td class="cell-pid">{s.pid}</td>
               <td class="cell-name">{s.name}</td>
+              <td class="cell-process" title={s.process}>{s.process || '-'}</td>
               <td class="cell-path" title={s.path}>{s.path}</td>
               <td class="cell-ports">{s.ports}</td>
               <td class="cell-status">
@@ -380,7 +386,7 @@
               <span class="status-dot" class:dot-running={s.status?.includes('运行中')}></span>
               <div>
                 <div class="service-card-name">{s.name}</div>
-                <div class="service-card-sub">PID {s.pid || '-'} · {s.category || '-'}</div>
+                <div class="service-card-sub">PID {s.pid || '-'} · {s.process || '-'} · {s.category || '-'}</div>
               </div>
             </div>
             <span class="service-card-status">{s.status || '-'}</span>
@@ -568,6 +574,7 @@
   .service-table .col-index { width: 32px; }
   .service-table .col-pid { width: 54px; }
   .service-table .col-name { width: 126px; }
+  .service-table .col-process { width: 86px; }
   .service-table .col-path { width: 164px; }
   .service-table .col-ports { width: 72px; }
   .service-table .col-status { width: 80px; }
@@ -585,6 +592,7 @@
   .cell-index { font-family: var(--theme-font-family-mono); color: var(--text-tertiary); text-align: center; width: 30px; }
   .cell-pid { font-family: var(--theme-font-family-mono); color: var(--text-secondary); }
   .cell-name { font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+  .cell-process { font-family: var(--theme-font-family-mono); font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-path { font-family: var(--theme-font-family-mono); font-size: 11px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-ports { font-family: var(--theme-font-family-mono); color: #22d3ee; white-space: nowrap; }
   .cell-status { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
