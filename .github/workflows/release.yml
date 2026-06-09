@@ -115,8 +115,8 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           npm run build --prefix web
-          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' fmt --check
-          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' test --locked
+          cargo --config 'net.offline=false' fmt --check
+          cargo --config 'net.offline=false' test --locked
 
       - name: Build package
         env:

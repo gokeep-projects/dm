@@ -58,11 +58,14 @@ cargo_base_cmd() {
     shift
   fi
   if [ "$USE_OFFLINE_DEPS" = "1" ]; then
-    cargo "${cargo_toolchain_arg[@]}" "$@"
+    cargo "${cargo_toolchain_arg[@]}" \
+      --config 'source.crates-io.replace-with="vendored-sources"' \
+      --config "source.vendored-sources.directory=\"$OFFLINE_DIR/cargo/vendor\"" \
+      --config 'net.offline=true' \
+      "$@"
   else
     cargo "${cargo_toolchain_arg[@]}" \
       --config 'net.offline=false' \
-      --config 'source.crates-io.replace-with="crates-io"' \
       "$@"
   fi
 }

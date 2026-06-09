@@ -247,8 +247,7 @@ mod tests {
 
     #[test]
     fn serve_long_daemon_flag_is_parsed() {
-        let cli = Cli::try_parse_from(["dm", "serve", "--daemon", "--bind", "127.0.0.1"])
-            .unwrap();
+        let cli = Cli::try_parse_from(["dm", "serve", "--daemon", "--bind", "127.0.0.1"]).unwrap();
         match cli.command {
             Some(Commands::Serve { port, bind, daemon }) => {
                 assert_eq!(port, 3399);

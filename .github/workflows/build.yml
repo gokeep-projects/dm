@@ -54,8 +54,8 @@ jobs:
 
       - name: Validate source
         run: |
-          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' fmt --check
-          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' test --locked
+          cargo --config 'net.offline=false' fmt --check
+          cargo --config 'net.offline=false' test --locked
 
       - name: Build packages
         run: ./package.sh
