@@ -1,4 +1,5 @@
 mod anomaly;
+mod check_config_store;
 mod checks;
 mod cli;
 mod config;
@@ -29,7 +30,9 @@ async fn main() {
     config::ensure_user_dirs(&cfg);
 
     let result = match cli.command {
-        Some(Commands::Serve { port, bind }) => cli::serve::execute(port, &bind).await,
+        Some(Commands::Serve { port, bind, daemon }) => {
+            cli::serve::execute(port, &bind, daemon).await
+        }
         Some(Commands::List { search, category }) => {
             cli::list::execute(search.as_deref(), category.as_deref())
         }
@@ -58,6 +61,7 @@ async fn main() {
                 cli::check_config::set(&check_id, &values)
             }
             CheckConfigAction::Import { file } => cli::check_config::import(&file),
+            CheckConfigAction::Export { output } => cli::check_config::export(output),
             CheckConfigAction::Template { output } => cli::check_config::template(output),
         },
         Some(Commands::Completions { shell }) => {
@@ -66,7 +70,7 @@ async fn main() {
             clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
             Ok(())
         }
-        None => cli::serve::execute(3399, "0.0.0.0").await,
+        None => cli::serve::execute(3399, "0.0.0.0", false).await,
     };
 
     if let Err(e) = result {

@@ -1,6 +1,5 @@
 use crate::cli::util;
 use crate::config;
-use crate::db::Database;
 use anyhow::{anyhow, Result};
 use colored::*;
 use serde_json::Value;
@@ -13,15 +12,18 @@ const CONFIGURABLE_CHECK_IDS: &[&str] = &[
     "nginx",
     "keepalived",
     "mysql",
+    "kafka",
     "java-service",
 ];
 
 pub fn get(check_id: &str, json: bool) -> Result<()> {
-    let db = open_db();
+    let cfg = config::Config::load();
+    let db = crate::check_config_store::open_runtime_db(&cfg);
     let record = db.get_check_config(check_id);
     let value = record
         .as_ref()
         .map(|r| r.value.clone())
+        .or_else(|| crate::check_config_store::load_config_value(&cfg, &db, check_id))
         .unwrap_or_else(|| serde_json::json!({}));
 
     if json {
@@ -78,7 +80,8 @@ pub fn set(check_id: &str, values: &[String]) -> Result<()> {
     if values.is_empty() {
         return Err(anyhow!("至少需要一个 KEY=VALUE 配置项"));
     }
-    let db = open_db();
+    let cfg = config::Config::load();
+    let db = crate::check_config_store::open_runtime_db(&cfg);
     let mut current = db
         .get_check_config(check_id)
         .map(|r| r.value)
@@ -105,13 +108,18 @@ pub fn set(check_id: &str, values: &[String]) -> Result<()> {
         obj.insert(key.to_string(), serde_json::json!(value.trim()));
     }
 
-    if !db.save_check_config(check_id, &current) {
+    if !crate::check_config_store::upsert_and_sync(&cfg, &db, check_id, &current) {
         return Err(anyhow!("保存检查配置失败"));
     }
     println!(
         "  {} {}",
         util::status_label("ok"),
-        format!("{} 配置已保存", check_id).bright_white()
+        format!(
+            "{} 配置已保存，并同步到 {}",
+            check_id,
+            crate::check_config_store::connection_config_path(&cfg).display()
+        )
+        .bright_white()
     );
     get(check_id, false)
 }
@@ -146,8 +154,9 @@ pub fn import(file: &Path) -> Result<()> {
         ));
     }
 
-    let db = open_db();
-    let mut saved = Vec::new();
+    let cfg = config::Config::load();
+    let db = crate::check_config_store::open_runtime_db(&cfg);
+    let mut to_save = Vec::new();
     for (check_id, mut value) in imported {
         if value
             .get("password")
@@ -165,10 +174,9 @@ pub fn import(file: &Path) -> Result<()> {
                 }
             }
         }
-        if db.save_check_config(&check_id, &value) {
-            saved.push(check_id);
-        }
+        to_save.push((check_id, value));
     }
+    let saved = crate::check_config_store::import_configs_and_sync(&cfg, &db, to_save);
 
     util::print_heading("连接配置导入", Some(&file.display().to_string()));
     println!(
@@ -176,6 +184,14 @@ pub fn import(file: &Path) -> Result<()> {
         util::status_label("ok"),
         saved.len(),
         saved.join(", ").bright_cyan()
+    );
+    println!(
+        "  {} 配置文件已同步: {}",
+        util::status_label("info"),
+        crate::check_config_store::connection_config_path(&cfg)
+            .display()
+            .to_string()
+            .bright_cyan()
     );
     if !skipped.is_empty() {
         println!(
@@ -194,10 +210,23 @@ pub fn import(file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_db() -> Database {
+pub fn export(output: Option<std::path::PathBuf>) -> Result<()> {
     let cfg = config::Config::load();
-    config::ensure_user_dirs(&cfg);
-    Database::open(&crate::config::db_path(&cfg))
+    let db = crate::check_config_store::open_runtime_db(&cfg);
+    let value = crate::check_config_store::export_value(&cfg, &db);
+    let _ = crate::check_config_store::sync_db_to_file(&cfg, &db);
+    let text = serde_json::to_string_pretty(&value)?;
+    if let Some(path) = output {
+        std::fs::write(&path, format!("{}\n", text))?;
+        println!(
+            "  {} {}",
+            util::status_label("ok"),
+            format!("连接配置已导出到 {}", path.display()).bright_white()
+        );
+    } else {
+        println!("{}", text);
+    }
+    Ok(())
 }
 
 fn value_to_string(value: &Value) -> String {
@@ -209,57 +238,7 @@ fn value_to_string(value: &Value) -> String {
 }
 
 fn template_value() -> Value {
-    serde_json::json!({
-        "version": 1,
-        "description": "DM 常规检查连接配置导入模板。只需要填写关键连接信息；config_path/data_path/log_path/program_path 可以留空，系统会根据进程、systemd、命令行参数和配置文件自动推断。",
-        "configs": {
-            "elasticsearch": {
-                "url": "http://127.0.0.1:9200",
-                "host": "127.0.0.1",
-                "port": "9200",
-                "username": "",
-                "password": "",
-                "config_path": "",
-                "data_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "redis": {
-                "host": "127.0.0.1",
-                "port": "6379",
-                "password": "",
-                "config_path": "",
-                "data_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "nginx": {
-                "config_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "keepalived": {
-                "config_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "mysql": {
-                "host": "127.0.0.1",
-                "port": "3306",
-                "username": "root",
-                "password": "",
-                "config_path": "",
-                "data_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "java-service": {
-                "service_prefix": "",
-                "log_path": "",
-                "program_path": ""
-            }
-        }
-    })
+    crate::check_config_store::template_value()
 }
 
 fn normalize_import_payload(payload: &Value) -> (Vec<(String, Value)>, Vec<String>, Vec<String>) {

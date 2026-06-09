@@ -15,6 +15,7 @@
   let configSaving = $state(false);
   let configMessage = $state('');
   let configPrompt = $state('');
+  let configFilePath = $state('');
   let showConfig = $state(false);
   let lastLoadedId = $state('');
 
@@ -172,11 +173,22 @@
 
   function tableRows(item, key) {
     const rows = sortedRows(item, key);
+    if (item.status === 'collapsed' && !expandedTables.has(key)) return [];
     if (expandedTables.has(key) || rows.length <= 12) return rows;
     return rows.slice(0, 12);
   }
 
-  const configurableChecks = new Set(['elasticsearch', 'redis', 'nginx', 'keepalived', 'mysql', 'java-service']);
+  function tableNeedsToggle(item) {
+    return item.status === 'collapsed' || (item.rows || []).length > 12;
+  }
+
+  function tableToggleText(item, key) {
+    if (expandedTables.has(key)) return '收起';
+    if (item.status === 'collapsed') return `展开全部 ${item.rows?.length || 0} 行`;
+    return `展开全部 ${item.rows?.length || 0} 行`;
+  }
+
+  const configurableChecks = new Set(['elasticsearch', 'redis', 'nginx', 'keepalived', 'mysql', 'kafka', 'java-service']);
 
   function configFields(checkId) {
     const commonPaths = [
@@ -204,6 +216,11 @@
       { key: 'port', label: '端口', type: 'text', placeholder: '3306' },
       { key: 'username', label: '用户名', type: 'text', placeholder: 'root' },
       { key: 'password', label: '密码', type: 'password', placeholder: '留空表示不修改已保存密码' },
+      ...commonPaths,
+    ];
+    if (checkId === 'kafka') return [
+      { key: 'host', label: '主机', type: 'text', placeholder: '127.0.0.1' },
+      { key: 'port', label: '端口', type: 'text', placeholder: '9092' },
       ...commonPaths,
     ];
     if (checkId === 'java-service') return [
@@ -238,7 +255,7 @@
       const hasHostPort = !isBlank(cfg.host) && !isBlank(cfg.port);
       return hasUrl || hasHostPort ? [] : ['访问地址，或主机 + 端口'];
     }
-    if (checkId === 'redis') {
+    if (checkId === 'redis' || checkId === 'kafka') {
       const missing = [];
       if (isBlank(cfg.host)) missing.push('主机');
       if (isBlank(cfg.port)) missing.push('端口');
@@ -259,7 +276,7 @@
 
   function isRequiredField(checkId, key) {
     if (checkId === 'elasticsearch') return key === 'url' || key === 'host' || key === 'port';
-    if (checkId === 'redis') return key === 'host' || key === 'port';
+    if (checkId === 'redis' || checkId === 'kafka') return key === 'host' || key === 'port';
     if (checkId === 'mysql') return key === 'host' || key === 'port' || key === 'username';
     if (checkId === 'java-service') return key === 'service_prefix';
     return false;
@@ -279,7 +296,7 @@
     const missing = requiredConfigMissing(id);
     if (missing.length) return '需要配置';
     if (id === 'elasticsearch') return checkConfig.url || [checkConfig.host, checkConfig.port].filter(Boolean).join(':') || '已配置';
-    if (id === 'redis' || id === 'mysql') return [checkConfig.host, checkConfig.port].filter(Boolean).join(':') || '已配置';
+    if (id === 'redis' || id === 'mysql' || id === 'kafka') return [checkConfig.host, checkConfig.port].filter(Boolean).join(':') || '已配置';
     if (id === 'java-service') return checkConfig.service_prefix || '已配置';
     return '可选配置';
   }
@@ -293,6 +310,7 @@
       if (r.ok) {
         const d = await r.json();
         checkConfig = d.value || {};
+        configFilePath = d.config_file || '';
         refreshConfigPrompt(checkConfig);
       } else {
         configMessage = '配置加载失败';
@@ -329,8 +347,9 @@
       } else {
         const d = await r.json();
         checkConfig = d.value || payload;
+        configFilePath = d.config_file || configFilePath;
         refreshConfigPrompt(checkConfig);
-        configMessage = '配置已保存，正在刷新最新检查结果';
+        configMessage = `配置已保存并同步到文件${configFilePath ? ': ' + configFilePath : ''}，正在刷新最新检查结果`;
         await load();
       }
     } catch (e) {
@@ -351,6 +370,7 @@
     checkConfig = {};
     configMessage = '';
     configPrompt = '';
+    configFilePath = '';
     showConfig = false;
     loadConfig();
     load();
@@ -389,7 +409,7 @@
       <div class="config-head">
         <div>
           <h2>检查连接配置 <span class="config-summary">{configSummary()}</span></h2>
-          <p>{configPrompt || '配置会持久化到数据库，路径等辅助信息可留空，保存后立即使用最新配置重新执行检查。'}</p>
+          <p>{configPrompt || `配置会同步持久化到数据库和连接配置文件${configFilePath ? '：' + configFilePath : ''}，路径等辅助信息可留空，保存后立即使用最新配置重新执行检查。`}</p>
         </div>
         <div class="config-actions">
           <button class="action-btn" onclick={() => showConfig = !showConfig}>
@@ -571,9 +591,9 @@
                       {/each}
                     </tbody>
                   </table>
-                  {#if item.rows?.length > 12}
+                  {#if tableNeedsToggle(item)}
                     <button class="table-toggle" onclick={() => toggleSet('tables', itemKey)}>
-                      {expandedTables.has(itemKey) ? '收起' : `展开全部 ${item.rows.length} 行`}
+                      {tableToggleText(item, itemKey)}
                     </button>
                   {/if}
                 </div>

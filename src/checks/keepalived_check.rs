@@ -7,6 +7,8 @@ pub fn check() -> CheckResult {
     let config_path = configured_or_first(&cfg.config_path, &["/etc/keepalived/keepalived.conf"]);
     let log_path = configured_or_first(&cfg.log_path, &["/var/log/syslog", "/var/log/messages"]);
     let running = !process_rows(&["keepalived"]).is_empty();
+    let installed = find_command("keepalived").is_some();
+    let available = running || installed;
     let config = config_path
         .as_ref()
         .and_then(|p| read_file_limited(p, 128 * 1024))
@@ -40,8 +42,16 @@ pub fn check() -> CheckResult {
                     },
                     Some(if running { "ok" } else { "warn" }),
                 ),
-                label("配置路径", path_text(config_path.as_ref()), None),
-                label("日志路径", path_text(log_path.as_ref()), None),
+                label(
+                    "配置路径",
+                    path_text_if_available(config_path.as_ref(), available),
+                    None,
+                ),
+                label(
+                    "日志路径",
+                    path_text_if_available(log_path.as_ref(), available),
+                    None,
+                ),
             ],
         },
         table_section(
@@ -62,8 +72,16 @@ pub fn check() -> CheckResult {
             scripts,
             "未解析到 vrrp_script",
         ),
-        config_preview_section("配置信息", config_path),
-        log_section("异常日志", log_path, 100),
+        if available {
+            config_preview_section("配置信息", config_path)
+        } else {
+            unavailable_config_section("配置信息", "Keepalived")
+        },
+        if available {
+            log_section("异常日志", log_path, 100)
+        } else {
+            unavailable_log_section("异常日志", "Keepalived")
+        },
         table_section(
             "进程信息",
             vec!["PID", "PPID", "用户", "状态", "CPU", "内存", "命令"],
@@ -138,4 +156,11 @@ fn configured_or_first(value: &str, defaults: &[&str]) -> Option<PathBuf> {
 fn path_text(path: Option<&PathBuf>) -> String {
     path.map(|p| p.display().to_string())
         .unwrap_or_else(|| "未推断到".to_string())
+}
+fn path_text_if_available(path: Option<&PathBuf>, available: bool) -> String {
+    if available {
+        path_text(path)
+    } else {
+        "未检测到程序，跳过路径推断".to_string()
+    }
 }

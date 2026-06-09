@@ -15,11 +15,26 @@ pub fn check() -> CheckResult {
             "/usr/local/nginx/logs/error.log",
         ],
     );
-    let nginx = find_command("nginx").unwrap_or_else(|| "nginx".to_string());
-    let version = command_output(&nginx, &["-v"]).unwrap_or_else(|| "未获取到版本".to_string());
-    let test = command_output(&nginx, &["-t"]).unwrap_or_else(|| "无法执行 nginx -t".to_string());
-    let dump = command_output(&nginx, &["-T"]).unwrap_or_default();
+    let nginx_cmd = find_command("nginx");
+    let installed = nginx_cmd.is_some();
+    let nginx = nginx_cmd.unwrap_or_else(|| "nginx".to_string());
+    let version = if installed {
+        command_output(&nginx, &["-v"]).unwrap_or_else(|| "未获取到版本".to_string())
+    } else {
+        "未安装".to_string()
+    };
+    let test = if installed {
+        command_output(&nginx, &["-t"]).unwrap_or_else(|| "无法执行 nginx -t".to_string())
+    } else {
+        "未安装，跳过 nginx -t".to_string()
+    };
+    let dump = if installed {
+        command_output(&nginx, &["-T"]).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let running = !process_rows(&["nginx: master", "nginx"]).is_empty();
+    let available = installed || running;
 
     let mut sections = Vec::new();
     sections.push(Section {
@@ -36,7 +51,15 @@ pub fn check() -> CheckResult {
                 },
                 Some(if running { "ok" } else { "warn" }),
             ),
-            label("程序路径", nginx, None),
+            label(
+                "程序路径",
+                if installed {
+                    nginx
+                } else {
+                    "未安装".to_string()
+                },
+                None,
+            ),
             label("版本", version, None),
             label(
                 "配置检测",
@@ -47,8 +70,16 @@ pub fn check() -> CheckResult {
                     "warn"
                 }),
             ),
-            label("配置路径", path_text(config_path.as_ref()), None),
-            label("错误日志", path_text(log_path.as_ref()), None),
+            label(
+                "配置路径",
+                path_text_if_available(config_path.as_ref(), available),
+                None,
+            ),
+            label(
+                "错误日志",
+                path_text_if_available(log_path.as_ref(), available),
+                None,
+            ),
         ],
     });
     sections.push(table_section(
@@ -75,8 +106,16 @@ pub fn check() -> CheckResult {
             "deny ",
         ],
     ));
-    sections.push(config_preview_section("完整配置预览", config_path));
-    sections.push(log_section("前 100 条异常日志", log_path, 100));
+    sections.push(if available {
+        config_preview_section("完整配置预览", config_path)
+    } else {
+        unavailable_config_section("完整配置预览", "Nginx")
+    });
+    sections.push(if available {
+        log_section("前 100 条异常日志", log_path, 100)
+    } else {
+        unavailable_log_section("前 100 条异常日志", "Nginx")
+    });
     sections.push(table_section(
         "进程信息",
         vec!["PID", "PPID", "用户", "状态", "CPU", "内存", "命令"],
@@ -125,4 +164,11 @@ fn configured_or_first(value: &str, defaults: &[&str]) -> Option<PathBuf> {
 fn path_text(path: Option<&PathBuf>) -> String {
     path.map(|p| p.display().to_string())
         .unwrap_or_else(|| "未推断到".to_string())
+}
+fn path_text_if_available(path: Option<&PathBuf>, available: bool) -> String {
+    if available {
+        path_text(path)
+    } else {
+        "未检测到程序，跳过路径推断".to_string()
+    }
 }

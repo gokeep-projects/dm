@@ -1,17 +1,20 @@
 <script>
   import { onMount } from 'svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   let scripts = $state([]);
   let search = $state('');
   let cat = $state('');
   let cats = $state([]);
   let err = $state(null);
   let loading = $state(true);
-  let view = $state('grid');
-  let sort = $state('name');
+  let view = $state('list');
+  let sort = $state('number');
   let execStats = $state({});
   let favorites = $state(new Set());
   let showFavOnly = $state(false);
-  let sourceFilter = $state('');
+  let showSystemScripts = $state(false);
+  let showFailedOnly = $state(false);
+  let showParamOnly = $state(false);
   let showUpload = $state(false);
   let showFilters = $state(false);
   let uploadFile = $state(null);
@@ -24,6 +27,8 @@
   let uploadLoading = $state(false);
   let uploadError = $state(null);
   let showUploadAdvanced = $state(false);
+  let uploadParamsText = $state('');
+  let uploadParams = $state([]);
   let editingScript = $state(null);
   let editName = $state('');
   let editDescription = $state('');
@@ -32,12 +37,20 @@
   let editAuthor = $state('');
   let editVersion = $state('');
   let editContent = $state('');
+  let editFile = $state(null);
+  let editParamsText = $state('');
   let editLoading = $state(false);
   let editError = $state(null);
   let runResults = $state({});
+  let headerSearchInput = $state(null);
+  let copiedCommandId = $state('');
+  let confirmDeleteScript = $state(null);
+  let deleteLoading = $state(false);
 
   const categoryIcons = { '系统检查': 'SYS', '系统安全': 'SEC', '日志管理': 'LOG', '服务管理': 'SVC', '网络诊断': 'NET', '网络': 'NET', '性能监控': 'MON', '中间件': 'MID', '系统管理': 'ADM' };
   const categoryColors = { '系统检查': ['#0ea5e9', '#0369a1'], '系统安全': ['#dc2626', '#991b1b'], '日志管理': ['#7c3aed', '#5b21b6'], '服务管理': ['#2563eb', '#1d4ed8'], '网络诊断': ['#059669', '#047857'], '网络': ['#059669', '#047857'], '性能监控': ['#d97706', '#b45309'], '中间件': ['#9333ea', '#7e22ce'], '系统管理': ['#64748b', '#475569'] };
+  const paramDefinitionPlaceholder = '[{"name":"target","description":"目标服务","type":"string","default":"nginx","required":true}]';
+  const executableAccept = '.sh,.bash,.zsh,.ksh,.py,.python,.pl,.perl,.rb,.lua,.js,.mjs,.php,.awk,.expect,.exp,.run,.bin';
 
   function getIcon(cat) { return categoryIcons[cat] || 'GEN'; }
   function getCatColors(cat) { return categoryColors[cat] || ['#6b7280', '#4b5563']; }
@@ -71,14 +84,88 @@
 
   function execCount(id) { return execStats[id]?.total_executions || 0; }
   function lastExec(id) { return execStats[id]?.last_execution || null; }
-  function categoryCount(c) { return scripts.filter(s => s.category === c).length; }
+  function lastExecText(id) {
+    const item = lastExec(id);
+    if (!item?.timestamp) return '未执行';
+    return String(item.timestamp).slice(0, 19);
+  }
+  function lastExecTitle(id) {
+    const item = lastExec(id);
+    return item?.timestamp || '未执行';
+  }
+  function lastExecState(id) {
+    const item = lastExec(id);
+    if (!item) return { label: '未执行', className: 'idle' };
+    if (item.exit_code === 0) return { label: '成功', className: 'ok' };
+    if (item.exit_code === null || item.exit_code === undefined) return { label: '运行中', className: 'running' };
+    return { label: `失败 ${item.exit_code}`, className: 'fail' };
+  }
+  function scriptInVisibleSource(s) { return showSystemScripts || s.user_managed; }
+  function visibleSourceCount() { return scripts.filter(scriptInVisibleSource).length; }
+  function categoryCount(c) { return scripts.filter(s => s.category === c && scriptInVisibleSource(s)).length; }
   function sourceLabel(s) { return s.user_managed ? '用户脚本' : '内置脚本'; }
   function sourceClass(s) { return s.user_managed ? 'user-source' : 'builtin-source'; }
-  function sourceCount(source) {
-    return scripts.filter(s => source === 'user' ? s.user_managed : !s.user_managed).length;
+  function sourceCount(source) { return scripts.filter(s => source === 'user' ? s.user_managed : !s.user_managed).length; }
+  function visibleScopeText() { return showSystemScripts ? '用户脚本 + 内置脚本' : '仅用户脚本，内置脚本未勾选'; }
+  function cliCommand(script) { return `dm run ${script.id}`; }
+  function versionText(script) { return script.metadata?.version ? `v${script.metadata.version}` : 'v1.0.0'; }
+  function scriptType(script) {
+    const path = String(script.path || '');
+    const ext = (path.split('.').pop() || '').toLowerCase();
+    const map = {
+      sh: 'Shell',
+      bash: 'Bash',
+      zsh: 'Zsh',
+      ksh: 'Ksh',
+      py: 'Python',
+      python: 'Python',
+      pl: 'Perl',
+      perl: 'Perl',
+      js: 'Node',
+      mjs: 'Node',
+      rb: 'Ruby',
+      lua: 'Lua',
+      php: 'PHP',
+      awk: 'AWK',
+      expect: 'Expect',
+      exp: 'Expect',
+      run: 'Exec',
+      bin: 'Binary',
+    };
+    return map[ext] || (path ? 'Exec' : 'Script');
   }
+  function failedExecCount() {
+    return scripts.filter(s => lastExecState(s.id).className === 'fail').length;
+  }
+  function paramCount(script) { return script.metadata?.params?.length || 0; }
+  function configurableCount() { return scripts.filter(s => paramCount(s) > 0).length; }
 
   function onSearch(e) { search = e.target.value; }
+
+  async function copyCommand(script) {
+    const command = cliCommand(script);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(command);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = command;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+      copiedCommandId = script.id;
+      setTimeout(() => {
+        if (copiedCommandId === script.id) copiedCommandId = '';
+      }, 1400);
+    } catch (e) {
+      console.warn('复制命令失败:', e);
+    }
+  }
 
   async function uploadScript() {
     if (!uploadFile) return;
@@ -91,10 +178,11 @@
       formData.append('id', inferredId);
       formData.append('title', inferredTitle);
       formData.append('description', uploadDescription.trim() || inferredTitle);
-      formData.append('feature', uploadFeature.trim() || inferredTitle);
-      formData.append('category', uploadCategory.trim() || '维护脚本');
-      formData.append('author', uploadAuthor.trim() || 'user');
-      formData.append('file', uploadFile);
+	      formData.append('feature', uploadFeature.trim() || inferredTitle);
+	      formData.append('category', uploadCategory.trim() || '维护脚本');
+	      formData.append('author', uploadAuthor.trim() || 'user');
+	      formData.append('params', JSON.stringify(normalizeUploadParams()));
+	      formData.append('file', uploadFile);
       const r = await fetch('/api/scripts/upload', { method: 'POST', body: formData });
       if (r.ok) {
         closeUpload();
@@ -118,6 +206,8 @@
     uploadAuthor = 'user';
     uploadError = null;
     showUploadAdvanced = false;
+    uploadParamsText = '';
+    uploadParams = [];
   }
 
   function handleFileSelect(e) {
@@ -126,6 +216,18 @@
       uploadFile = file;
       if (!uploadId) uploadId = file.name.split('.')[0].toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
       if (!uploadTitle) uploadTitle = file.name.replace(/\.[^.]+$/, '');
+    }
+  }
+
+  async function handleEditFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    editFile = file;
+    editError = null;
+    try {
+      editContent = await file.text();
+    } catch (_) {
+      editError = '已选择脚本文件；该文件不是可预览文本，保存时仍会按原始文件更新。';
     }
   }
 
@@ -138,7 +240,9 @@
     editCategory = script.category || '维护脚本';
     editAuthor = script.metadata?.author || '';
     editVersion = script.metadata?.version || '1.0.0';
+    editParamsText = JSON.stringify(script.metadata?.params || [], null, 2);
     editContent = '';
+    editFile = null;
     editError = null;
     editLoading = true;
     try {
@@ -155,6 +259,150 @@
     editingScript = null;
     editError = null;
     editContent = '';
+    editFile = null;
+    editParamsText = '';
+  }
+
+  function parseParamsText(textValue) {
+    const text = textValue.trim();
+    if (!text) return [];
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) throw new Error('参数定义必须是 JSON 数组');
+    return parsed.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error(`第 ${index + 1} 个参数必须是对象`);
+      }
+      const name = String(item.name || '').trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(name)) {
+        throw new Error(`第 ${index + 1} 个参数 name 不合法，只能使用字母、数字、下划线、短横线，且必须以字母或下划线开头`);
+      }
+      const type = String(item.type || 'string').trim();
+      if (!['string', 'number', 'boolean', 'select'].includes(type)) {
+        throw new Error(`第 ${index + 1} 个参数 type 只能是 string/number/boolean/select`);
+      }
+      return {
+        name,
+        description: String(item.description || ''),
+        type,
+        default: item.default === undefined || item.default === null ? null : String(item.default),
+        required: Boolean(item.required),
+      };
+    });
+  }
+
+  function parseEditParams() {
+    return parseParamsText(editParamsText);
+  }
+
+  function formatEditParams() {
+    try {
+      editParamsText = JSON.stringify(parseEditParams(), null, 2);
+      editError = null;
+    } catch (e) {
+      editError = e.message;
+    }
+  }
+
+  function appendParamTemplate(textValue) {
+    const params = parseParamsText(textValue);
+    const used = new Set(params.map(p => p.name));
+    let name = 'target';
+    let index = 1;
+    while (used.has(name)) {
+      index += 1;
+      name = `target_${index}`;
+    }
+    params.push({
+      name,
+      description: '目标服务或路径',
+      type: 'string',
+      default: '',
+      required: false,
+    });
+    return JSON.stringify(params, null, 2);
+  }
+
+  function formatUploadParams() {
+    try {
+      uploadParamsText = JSON.stringify(parseParamsText(uploadParamsText), null, 2);
+      uploadError = null;
+    } catch (e) {
+      uploadError = e.message;
+    }
+  }
+
+  function insertUploadParamTemplate() {
+    try {
+      uploadParamsText = appendParamTemplate(uploadParamsText);
+      uploadError = null;
+    } catch (e) {
+      uploadParamsText = JSON.stringify([{
+        name: 'target',
+        description: '目标服务或路径',
+        type: 'string',
+        default: '',
+        required: false,
+      }], null, 2);
+      uploadError = null;
+    }
+  }
+
+  function clearUploadParams() {
+    uploadParams = [];
+    uploadError = null;
+  }
+
+  function newUploadParam() {
+    return { name: '', description: '', type: 'string', default: '', required: false };
+  }
+
+  function addUploadParam() {
+    uploadParams = [...uploadParams, newUploadParam()];
+  }
+
+  function updateUploadParam(index, key, value) {
+    uploadParams = uploadParams.map((param, i) => i === index ? { ...param, [key]: value } : param);
+  }
+
+  function removeUploadParam(index) {
+    uploadParams = uploadParams.filter((_, i) => i !== index);
+  }
+
+  function normalizeUploadParams() {
+    return uploadParams
+      .map((item, index) => ({ ...item, name: String(item.name || '').trim(), description: String(item.description || '').trim() }))
+      .filter(item => item.name || item.description || item.default)
+      .map((item, index) => {
+        const name = item.name || `param_${index + 1}`;
+        return {
+          name,
+          description: item.description || name,
+          type: item.type || 'string',
+          default: item.default === undefined || item.default === null || item.default === '' ? null : String(item.default),
+          required: Boolean(item.required),
+        };
+      });
+  }
+
+  function insertParamTemplate() {
+    try {
+      editParamsText = appendParamTemplate(editParamsText);
+      editError = null;
+    } catch (e) {
+      editParamsText = JSON.stringify([{
+        name: 'target',
+        description: '目标服务或路径',
+        type: 'string',
+        default: '',
+        required: false,
+      }], null, 2);
+      editError = null;
+    }
+  }
+
+  function clearEditParams() {
+    editParamsText = '[]';
+    editError = null;
   }
 
   async function updateScript() {
@@ -162,18 +410,33 @@
     editLoading = true;
     editError = null;
     try {
+      const params = parseEditParams();
+      if (editFile) {
+        const fileForm = new FormData();
+        fileForm.append('file', editFile);
+        const fileRes = await fetch('/api/scripts/' + encodeURIComponent(editingScript.id) + '/file', {
+          method: 'PUT',
+          body: fileForm,
+        });
+        if (!fileRes.ok) {
+          const d = await fileRes.json().catch(() => ({}));
+          throw new Error(d.error || (fileRes.status === 403 ? '内置脚本不可更新文件' : '脚本文件更新失败: ' + fileRes.status));
+        }
+      }
+      const payload = {
+        name: editName,
+        description: editDescription,
+        feature: editFeature,
+        category: editCategory,
+        author: editAuthor,
+        version: editVersion,
+        params,
+      };
+      if (!editFile) payload.content = editContent;
       const r = await fetch('/api/scripts/' + encodeURIComponent(editingScript.id), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: editName,
-          description: editDescription,
-          feature: editFeature,
-          category: editCategory,
-          author: editAuthor,
-          version: editVersion,
-          content: editContent,
-        }),
+        body: JSON.stringify(payload),
       });
       if (r.ok) {
         closeEditScript();
@@ -188,12 +451,23 @@
 
   async function deleteScript(script) {
     if (!script?.user_managed) return;
-    if (!confirm('确定删除脚本 "' + script.name + '"？')) return;
+    confirmDeleteScript = script;
+  }
+
+  async function confirmDeleteSelectedScript() {
+    const script = confirmDeleteScript;
+    if (!script?.user_managed) return;
+    deleteLoading = true;
     try {
       const r = await fetch('/api/scripts/' + encodeURIComponent(script.id), { method: 'DELETE' });
-      if (r.ok) await load();
-      else alert(r.status === 403 ? '内置脚本不可删除' : '删除失败: ' + r.status);
-    } catch (e) { alert('删除失败: ' + e.message); }
+      if (r.ok) {
+        confirmDeleteScript = null;
+        await load();
+      } else {
+        uploadError = r.status === 403 ? '内置脚本不可删除' : '删除失败: ' + r.status;
+      }
+    } catch (e) { uploadError = '删除失败: ' + e.message; }
+    deleteLoading = false;
   }
 
   function loadFavorites() {
@@ -235,7 +509,12 @@
       s.id?.toLowerCase().includes(q) ||
       s.category?.toLowerCase().includes(q) ||
       s.feature?.toLowerCase().includes(q) ||
-      s.description?.toLowerCase().includes(q);
+      s.description?.toLowerCase().includes(q) ||
+      (s.metadata?.params || []).some(p =>
+        p.name?.toLowerCase().includes(q) ||
+        p.description?.toLowerCase().includes(q) ||
+        p.type?.toLowerCase().includes(q)
+      );
   }
 
   let numberedScripts = $derived.by(() => scripts.map((script, index) => {
@@ -252,13 +531,17 @@
     let arr = numberedScripts.filter(s => {
       const matchesCategory = !cat || s.category === cat;
       const matchesSearch = scriptMatchesSearch(s, q);
-      const matchesSource = !sourceFilter ||
-        (sourceFilter === 'user' ? s.user_managed : !s.user_managed);
+      const matchesSource = scriptInVisibleSource(s);
       return matchesCategory && matchesSearch && matchesSource;
     });
     if (showFavOnly) arr = arr.filter(s => favorites.has(s.id));
-    if (sort === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    if (showFailedOnly) arr = arr.filter(s => lastExecState(s.id).className === 'fail');
+    if (showParamOnly) arr = arr.filter(s => paramCount(s) > 0);
+    if (sort === 'number') arr.sort((a, b) => a.number - b.number);
+    else if (sort === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    else if (sort === 'type') arr.sort((a, b) => scriptType(a).localeCompare(scriptType(b), 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN'));
     else if (sort === 'category') arr.sort((a, b) => a.category.localeCompare(b.category, 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN'));
+    else if (sort === 'version') arr.sort((a, b) => versionText(a).localeCompare(versionText(b), 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN'));
     else if (sort === 'exec') arr.sort((a, b) => execCount(b.id) - execCount(a.id));
     else if (sort === 'recent') {
       arr.sort((a, b) => {
@@ -285,9 +568,19 @@
     return Math.round(success / total * 100) + '%';
   });
 
+  function onGlobalKeydown(event) {
+    const tag = event.target?.tagName?.toLowerCase();
+    if (event.key === '/' && !event.ctrlKey && !event.metaKey && tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+      event.preventDefault();
+      headerSearchInput?.focus();
+    }
+  }
+
   onMount(() => {
     loadFavorites();
     load();
+    window.addEventListener('keydown', onGlobalKeydown);
+    return () => window.removeEventListener('keydown', onGlobalKeydown);
   });
 </script>
 
@@ -295,26 +588,62 @@
   <div class="page-header">
     <div class="header-left">
       <div>
-        <h2 class="page-title">脚本中心</h2>
-        <p class="page-subtitle">共 {scripts.length} 个脚本，当前显示 {sortedScripts.length} 个</p>
+        <h2 class="page-title">维护脚本中心</h2>
+        <p class="page-subtitle">共 {scripts.length} 个脚本，当前显示 {sortedScripts.length} 个 · {visibleScopeText()}</p>
       </div>
       <div class="summary-pills">
         <span class="summary-pill">分类 {cats.length}</span>
         <span class="summary-pill">执行 {totalExecutions}</span>
         <span class="summary-pill">成功率 {successRate}</span>
+        <button class="summary-pill summary-filter" class:active={showFailedOnly} onclick={() => showFailedOnly = !showFailedOnly}>
+          最近失败 {failedExecCount()}
+        </button>
       </div>
     </div>
     <div class="header-right">
+      <div class="header-search search-wrap">
+        <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.35-4.35" stroke-linecap="round"/>
+        </svg>
+        <input
+          bind:this={headerSearchInput}
+          class="search-input"
+          value={search}
+          oninput={onSearch}
+          placeholder="搜索脚本、ID、功能..."
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="搜索脚本" />
+        {#if !search}
+          <span class="search-shortcut">/</span>
+        {/if}
+        {#if search}
+          <button class="search-clear" onclick={() => search = ''} aria-label="清空搜索">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6 6 18M6 6l12 12" stroke-linecap="round"/>
+            </svg>
+          </button>
+        {/if}
+      </div>
       <button class="upload-btn" onclick={() => { showUpload = true; uploadError = null; }}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         上传脚本
       </button>
       <button class="upload-btn filter-toggle-btn" onclick={() => showFilters = !showFilters}>
-        筛选{cat || search || showFavOnly || sourceFilter ? ' *' : ''} {showFilters ? '↑' : '↓'}
+        筛选{cat || search || showFavOnly || showFailedOnly || showSystemScripts ? ' *' : ''} {showFilters ? '↑' : '↓'}
       </button>
+      <label class="builtin-checkbox-toggle" class:active={showSystemScripts} title="默认不勾选；勾选后才显示内置脚本">
+        <input type="checkbox" bind:checked={showSystemScripts} />
+        <span>显示内置脚本</span>
+        <em>{showSystemScripts ? '已显示' : '默认关闭'}</em>
+      </label>
       <select class="sort-select" bind:value={sort} aria-label="排序方式">
+        <option value="number">默认排序</option>
         <option value="name">按名称</option>
+        <option value="type">按脚本类型</option>
         <option value="category">按分类</option>
+        <option value="version">按版本</option>
         <option value="exec">按执行次数</option>
         <option value="recent">按最近执行</option>
       </select>
@@ -344,43 +673,22 @@
 
   {#if showFilters}
   <div class="filter-section">
-    <div class="search-wrap">
-      <svg class="search-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="11" cy="11" r="8"/>
-        <path d="m21 21-4.35-4.35" stroke-linecap="round"/>
-      </svg>
-      <input
-        class="search-input"
-        value={search}
-        oninput={onSearch}
-        placeholder="输入编号、名称、ID、分类、功能或描述"
-        autocomplete="off"
-        spellcheck="false"
-        aria-label="搜索脚本" />
-      {#if search}
-        <button class="search-clear" onclick={() => search = ''} aria-label="清空搜索">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 6 6 18M6 6l12 12" stroke-linecap="round"/>
-          </svg>
-        </button>
-      {/if}
-    </div>
     <div class="category-chips" aria-label="分类筛选">
       <button class="chip" class:active={!cat} onclick={() => cat = ''}>
-        <span>全部</span>
-        <span class="chip-count">{scripts.length}</span>
+        <span>当前范围全部</span>
+        <span class="chip-count">{visibleSourceCount()}</span>
       </button>
       <button class="chip fav-chip" class:active={showFavOnly} onclick={() => showFavOnly = !showFavOnly}>
         <span>收藏</span>
         <span class="chip-count">{favorites.size}</span>
       </button>
-      <button class="chip" class:active={sourceFilter === 'user'} onclick={() => sourceFilter = sourceFilter === 'user' ? '' : 'user'}>
-        <span>用户脚本</span>
-        <span class="chip-count">{sourceCount('user')}</span>
+      <button class="chip failed-chip" class:active={showFailedOnly} onclick={() => showFailedOnly = !showFailedOnly}>
+        <span>最近失败</span>
+        <span class="chip-count">{failedExecCount()}</span>
       </button>
-      <button class="chip" class:active={sourceFilter === 'builtin'} onclick={() => sourceFilter = sourceFilter === 'builtin' ? '' : 'builtin'}>
-        <span>内置脚本</span>
-        <span class="chip-count">{sourceCount('builtin')}</span>
+      <button class="chip param-chip" class:active={showParamOnly} onclick={() => showParamOnly = !showParamOnly}>
+        <span>可配置</span>
+        <span class="chip-count">{configurableCount()}</span>
       </button>
       {#each cats as c}
         <button class="chip" class:active={cat === c} onclick={() => cat = c}>
@@ -413,20 +721,32 @@
     <div class="scripts-grid">
       {#each sortedScripts as s, i (s.id)}
         <a href="#/script/{s.id}" class="script-card" style="animation-delay:{Math.min(i * 40, 600)}ms" title="{s.name}（{s.id}）\n分类：{s.category}\n{s.feature || s.description}">
-          <div class="card-glow" style="background:radial-gradient(circle, {getCatColors(s.category)[0]}15, transparent 70%)"></div>
           <div class="card-inner">
-            <div class="card-header">
-              <span class="script-number">#{s.numberLabel}</span>
+            <div class="card-top">
               <div class="card-icon" style="background:linear-gradient(135deg,{getCatColors(s.category)[0]}, {getCatColors(s.category)[1]})">
                 <span>{getIcon(s.category)}</span>
               </div>
-              <div class="card-meta">
-                <span class="card-category">{s.category}</span>
-                <span class="source-pill {sourceClass(s)}">{sourceLabel(s)}</span>
-                {#if s.metadata?.version}
-                  <span class="card-version">v{s.metadata.version}</span>
+              <div class="card-head-main">
+                <div class="card-kicker">
+                  <span class="script-number">#{s.numberLabel}</span>
+                  <span class="card-category">{s.category}</span>
+                  <span class="source-pill {sourceClass(s)}">{sourceLabel(s)}</span>
+                  {#if s.metadata?.version}
+                    <span class="card-version">v{s.metadata.version}</span>
+                  {/if}
+                  {#if paramCount(s) > 0}
+                    <span class="param-badge">参数 {paramCount(s)}</span>
+                  {/if}
+                </div>
+                {#if search.trim()}
+                  <h3 class="card-title">{@html highlightMatch(s.name, search)}</h3>
+                {:else}
+                  <h3 class="card-title">{s.name}</h3>
                 {/if}
               </div>
+            </div>
+
+            <div class="card-actions">
               <button
                 class="card-fav-btn"
                 class:faved={isFav(s.id)}
@@ -460,110 +780,144 @@
                   删除
                 </button>
               {/if}
+            </div>
+
+            <div class="card-body">
               {#if execCount(s.id) > 0}
-                <span class="card-badge" title="最近执行 {execCount(s.id)} 次">
+                <span class="card-badge inline-badge" title="最近执行 {execCount(s.id)} 次">
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <polygon points="6 3 20 12 6 21 6 3" fill="currentColor"/>
                   </svg>
                   {execCount(s.id)}
                 </span>
               {/if}
+              {#if search.trim()}
+                {#if s.feature}
+                  <p class="card-feature">{@html highlightMatch(s.feature, search)}</p>
+                {/if}
+                <p class="card-desc">{@html highlightMatch(s.description, search)}</p>
+              {:else}
+                {#if s.feature}
+                  <p class="card-feature">{s.feature}</p>
+                {/if}
+                <p class="card-desc">{s.description}</p>
+              {/if}
             </div>
-             {#if search.trim()}
-              <h3 class="card-title">{@html highlightMatch(s.name, search)}</h3>
-              {#if s.feature}
-                <p class="card-feature">{@html highlightMatch(s.feature, search)}</p>
-              {/if}
-              <p class="card-desc">{@html highlightMatch(s.description, search)}</p>
-            {:else}
-              <h3 class="card-title">{s.name}</h3>
-              {#if s.feature}
-                <p class="card-feature">{s.feature}</p>
-              {/if}
-              <p class="card-desc">{s.description}</p>
-            {/if}
-            {#if s.metadata?.example}
-              <div class="card-example">
-                <span class="example-label">示例</span>
-                <code class="example-cmd">{s.metadata.example}</code>
-              </div>
-            {/if}
             <div class="card-footer">
-              <code class="card-cmd">$ dm run {s.id}</code>
-              {#if s.metadata?.author}
-                <span class="card-author">· {s.metadata.author}</span>
-              {/if}
+              <div class="card-command">
+                <button
+                  class="row-copy-btn card-copy-cli"
+                  onclick={(e) => { e.preventDefault(); e.stopPropagation(); copyCommand(s); }}
+                  aria-label="复制执行命令 {s.name}"
+                  title={cliCommand(s)}>
+                  {copiedCommandId === s.id ? '已复制' : '复制 CLI'}
+                </button>
+              </div>
+              <div class="card-foot-meta">
+                {#if s.metadata?.author}
+                  <span class="card-author">{s.metadata.author}</span>
+                {/if}
+                {#if s.metadata?.example}
+                  <span class="card-example-inline">示例 {s.metadata.example}</span>
+                {/if}
+              </div>
             </div>
           </div>
         </a>
       {/each}
     </div>
   {:else}
-    <div class="scripts-list">
+    <div class="scripts-list table-scroll" aria-label="维护脚本列表，可横向拖动查看全部列">
+      <div class="scripts-list-head" aria-hidden="true">
+        <span>序号</span>
+        <span>名称</span>
+        <span>功能</span>
+        <span>类型</span>
+        <span>分类</span>
+        <span>标识</span>
+        <span>状态</span>
+        <span>次数</span>
+        <span>时间</span>
+        <span>CLI</span>
+        <span>操作</span>
+      </div>
       {#each sortedScripts as s, i (s.id)}
         <a href="#/script/{s.id}" class="script-row" style="animation-delay:{Math.min(i * 30, 500)}ms">
           <span class="row-number">#{s.numberLabel}</span>
-          <div class="row-icon" style="background:linear-gradient(135deg,{getCatColors(s.category)[0]}, {getCatColors(s.category)[1]})">
-            {getIcon(s.category)}
-          </div>
-          <div class="row-info">
-            <div class="row-title-row">
-              {#if search.trim()}
-                <h3 class="row-title">{@html highlightMatch(s.name, search)}</h3>
-              {:else}
-                <h3 class="row-title">{s.name}</h3>
-              {/if}
-              <span class="row-id">{s.id}</span>
-              <span class="source-pill {sourceClass(s)}">{sourceLabel(s)}</span>
-              {#if s.metadata?.version}
-                <span class="row-version">v{s.metadata.version}</span>
-              {/if}
-              {#if execCount(s.id) > 0}
-                <span class="row-badge">▶ {execCount(s.id)}</span>
-              {/if}
-            </div>
+          <div class="row-name">
             {#if search.trim()}
-              <p class="row-desc">{@html highlightMatch(s.feature || s.description, search)}</p>
+              <h3 class="row-title">{@html highlightMatch(s.name, search)}</h3>
             {:else}
-              <p class="row-desc">{s.feature || s.description}</p>
+              <h3 class="row-title">{s.name}</h3>
             {/if}
+          </div>
+          <div class="row-feature">
+            <span class="row-desc">
+              {#if search.trim()}
+                {@html highlightMatch(s.feature || s.description, search)}
+              {:else}
+                {s.feature || s.description}
+              {/if}
+            </span>
+          </div>
+          <div class="row-type">
+            <span class="type-pill">{scriptType(s)}</span>
           </div>
           <div class="row-category">
             <span class="cat-pill" style="background:{getCatColors(s.category)[0]}1a;color:{getCatColors(s.category)[0]};border-color:{getCatColors(s.category)[0]}33">{s.category}</span>
           </div>
-          <div class="row-cmd">$ dm run {s.id}</div>
-          <button
-            class="row-fav-btn"
-            class:faved={isFav(s.id)}
-            onclick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFav(s.id); }}
-            aria-label="{isFav(s.id) ? '取消收藏' : '收藏'} {s.name}"
-            title="{isFav(s.id) ? '取消收藏' : '收藏'}">
-            {isFav(s.id) ? '★' : '☆'}
-          </button>
-          <button
-            class="row-run-btn"
-            onclick={(e) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/script/' + s.id + '/run'; }}
-            aria-label="快速执行 {s.name}"
-            title="快速执行">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M8 5v14l11-7z"/>
-            </svg>
-          </button>
-          {#if s.user_managed}
+          <div class="row-identity-cell">
+            <span class="row-id">{s.id}</span>
+            <span class="row-version-mini">{versionText(s)}</span>
+          </div>
+          <div class="row-status-cell">
+            <span class="last-state {lastExecState(s.id).className}">{lastExecState(s.id).label}</span>
+          </div>
+          <div class="row-exec-count">{execCount(s.id)}</div>
+          <div class="row-time-cell"><span class="last-time" title={lastExecTitle(s.id)}>{lastExecText(s.id)}</span></div>
+          <div class="row-command">
             <button
-              class="row-edit-btn"
-              onclick={(e) => { e.preventDefault(); e.stopPropagation(); openEditScript(s); }}
-              aria-label="编辑 {s.name}">
-              编辑
+              class="row-copy-btn"
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); copyCommand(s); }}
+              aria-label="复制执行命令 {s.name}"
+              title={cliCommand(s)}>
+              {copiedCommandId === s.id ? '已复制' : '复制 CLI'}
+            </button>
+          </div>
+          <div class="row-actions">
+            <button
+              class="row-fav-btn"
+              class:faved={isFav(s.id)}
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFav(s.id); }}
+              aria-label="{isFav(s.id) ? '取消收藏' : '收藏'} {s.name}"
+              title="{isFav(s.id) ? '取消收藏' : '收藏'}">
+              {isFav(s.id) ? '★' : '☆'}
             </button>
             <button
-              class="row-delete-btn"
-              onclick={(e) => { e.preventDefault(); e.stopPropagation(); deleteScript(s); }}
-              aria-label="删除 {s.name}">
-              删除
+              class="row-run-btn"
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/script/' + s.id + '/run'; }}
+              aria-label="执行 {s.name} 并查看实时返回"
+              title="执行并查看实时返回">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+              <span>执行</span>
             </button>
-          {/if}
-          <div class="row-arrow">→</div>
+            {#if s.user_managed}
+              <button
+                class="row-edit-btn"
+                onclick={(e) => { e.preventDefault(); e.stopPropagation(); openEditScript(s); }}
+                aria-label="编辑 {s.name}">
+                编辑
+              </button>
+              <button
+                class="row-delete-btn"
+                onclick={(e) => { e.preventDefault(); e.stopPropagation(); deleteScript(s); }}
+                aria-label="删除 {s.name}">
+                删除
+              </button>
+            {/if}
+          </div>
         </a>
       {/each}
     </div>
@@ -571,15 +925,15 @@
 </div>
 
 {#if showUpload}
-  <div class="modal-overlay" onclick={closeUpload} role="presentation">
-    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+  <div class="modal-overlay locked-overlay" role="presentation">
+    <div class="modal upload-script-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-header">
         <h3>上传脚本</h3>
         <button class="modal-close" onclick={closeUpload}>✕</button>
       </div>
       <div class="modal-body">
         <div class="upload-area">
-          <input type="file" id="script-file" accept=".sh,.py,.pl,.js,.bash" onchange={handleFileSelect} class="file-input" />
+          <input type="file" id="script-file" accept={executableAccept} onchange={handleFileSelect} class="file-input" />
           <label for="script-file" class="file-label">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             <span>{uploadFile ? uploadFile.name : '选择脚本文件'}</span>
@@ -617,13 +971,46 @@
               <span>描述</span>
               <textarea bind:value={uploadDescription} rows="3" placeholder="适用场景、注意事项、输入输出说明"></textarea>
             </label>
+            <div class="form-field full upload-param-builder">
+              <span class="field-title-row">
+                执行参数
+                <button type="button" class="inline-mini-btn" onclick={addUploadParam}>添加参数</button>
+                {#if uploadParams.length > 0}
+                  <button type="button" class="inline-mini-btn danger" onclick={clearUploadParams}>清空</button>
+                {/if}
+              </span>
+              {#if uploadParams.length === 0}
+                <div class="param-empty">无参数脚本可直接上传；需要参数时点击“添加参数”。</div>
+              {:else}
+                <div class="upload-param-list">
+                  {#each uploadParams as param, index}
+                    <div class="upload-param-row">
+                      <input value={param.name} placeholder="参数名" oninput={(e) => updateUploadParam(index, 'name', e.currentTarget.value)} />
+                      <input value={param.description} placeholder="说明" oninput={(e) => updateUploadParam(index, 'description', e.currentTarget.value)} />
+                      <select value={param.type} onchange={(e) => updateUploadParam(index, 'type', e.currentTarget.value)}>
+                        <option value="string">文本</option>
+                        <option value="number">数字</option>
+                        <option value="boolean">开关</option>
+                        <option value="select">选项</option>
+                      </select>
+                      <input value={param.default || ''} placeholder="默认值" oninput={(e) => updateUploadParam(index, 'default', e.currentTarget.value)} />
+                      <label class="param-required">
+                        <input type="checkbox" checked={param.required} onchange={(e) => updateUploadParam(index, 'required', e.currentTarget.checked)} />
+                        必填
+                      </label>
+                      <button type="button" class="inline-mini-btn danger" onclick={() => removeUploadParam(index)}>删除</button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              <small class="field-hint">参数会在脚本详情页自动生成表单，并转换为 CLI 的 --param KEY=VALUE。</small>
+            </div>
           </div>
         {/if}
         {#if uploadError}
           <p class="upload-error">{uploadError}</p>
         {/if}
         <div class="upload-actions">
-          <button class="cancel-btn" onclick={closeUpload}>取消</button>
           <button class="submit-btn" onclick={uploadScript} disabled={!uploadFile || uploadLoading}>
             {uploadLoading ? '上传中...' : '上传'}
           </button>
@@ -634,7 +1021,7 @@
 {/if}
 
 {#if editingScript}
-  <div class="modal-overlay" onclick={closeEditScript} role="presentation">
+  <div class="modal-overlay locked-overlay" role="presentation">
     <div class="modal script-edit-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-header">
         <h3>编辑脚本 - {editingScript.id}</h3>
@@ -669,7 +1056,29 @@
         </label>
         <label class="form-field full">
           <span>脚本内容</span>
+          <div class="edit-file-row">
+            <input type="file" id="edit-script-file" accept={executableAccept} onchange={handleEditFileSelect} class="file-input" />
+            <label for="edit-script-file" class="edit-file-label">
+              {editFile ? `已选择：${editFile.name}` : '重新传入脚本文件'}
+            </label>
+            <small>支持 sh / perl / python 等可执行脚本；保存后会替换原文件并刷新脚本类型。</small>
+          </div>
           <textarea bind:value={editContent} rows="14" class="code-editor" spellcheck="false"></textarea>
+        </label>
+        <label class="form-field full">
+          <span class="field-title-row">
+            参数定义 JSON
+            <button type="button" class="inline-mini-btn" onclick={formatEditParams}>格式化</button>
+            <button type="button" class="inline-mini-btn" onclick={insertParamTemplate}>插入示例</button>
+            <button type="button" class="inline-mini-btn danger" onclick={clearEditParams}>清空</button>
+          </span>
+          <textarea
+            bind:value={editParamsText}
+            rows="6"
+            class="params-json-editor"
+            spellcheck="false"
+            placeholder={paramDefinitionPlaceholder}></textarea>
+          <small class="field-hint">支持 string / number / boolean / select。保存后脚本详情页会自动生成参数表单、命令预览、历史复现参数。</small>
         </label>
         {#if editError}
           <p class="upload-error">{editError}</p>
@@ -684,6 +1093,17 @@
     </div>
   </div>
 {/if}
+
+<ConfirmDialog
+  open={Boolean(confirmDeleteScript)}
+  title="删除用户脚本"
+  message={`确认删除脚本「${confirmDeleteScript?.name || ''}」？该操作只允许删除用户脚本，内置脚本会被系统保护。`}
+  detail={confirmDeleteScript ? `ID: ${confirmDeleteScript.id}\n分类: ${confirmDeleteScript.category}\n命令: dm run ${confirmDeleteScript.id}` : ''}
+  confirmText="删除脚本"
+  loading={deleteLoading}
+  onCancel={() => confirmDeleteScript = null}
+  onConfirm={confirmDeleteSelectedScript}
+/>
 
 <style>
   .scripts-page {
@@ -750,8 +1170,53 @@
   .upload-btn:hover { background: linear-gradient(135deg, #10b981, #059669); color: #fff; transform: translateY(-1px); box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3); }
   .filter-toggle-btn { background: var(--bg-secondary); border-color: rgba(34, 211, 238, 0.18); color: var(--accent-primary); }
 
+  .builtin-checkbox-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 0 10px;
+    border: 1px solid rgba(34, 211, 238, .18);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .builtin-checkbox-toggle input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: #22d3ee;
+  }
+
+  .builtin-checkbox-toggle em {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, .1);
+    color: var(--text-tertiary);
+    font-style: normal;
+    font-size: 10px;
+    font-weight: 900;
+  }
+
+  .builtin-checkbox-toggle:has(input:checked) {
+    border-color: rgba(52, 211, 153, .38);
+    background: linear-gradient(135deg, rgba(16, 185, 129, .14), rgba(34, 211, 238, .1));
+    color: #a7f3d0;
+  }
+
+  .builtin-checkbox-toggle:has(input:checked) em {
+    background: rgba(16, 185, 129, .16);
+    color: #a7f3d0;
+  }
+
   .modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 100; display: flex; align-items: center; justify-content: center; }
   .modal { width: 400px; max-width: 90vw; max-height: 86vh; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .upload-script-modal { width: min(860px, 94vw); max-height: 90vh; }
   .script-edit-modal { width: min(860px, 92vw); }
   .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border-primary); }
   .modal-header h3 { margin: 0; font-size: 15px; color: var(--text-primary); }
@@ -778,6 +1243,13 @@
   .form-field input:focus,
   .form-field textarea:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-primary-light); }
   .code-editor { font-family: var(--theme-font-family-mono); line-height: 1.55; white-space: pre; overflow: auto; min-height: 220px; height: clamp(220px, 34vh, 420px); resize: vertical; }
+  .params-json-editor { font-family: var(--theme-font-family-mono); line-height: 1.5; white-space: pre; overflow: auto; min-height: 116px; resize: vertical; }
+  .field-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .inline-mini-btn { min-height: 23px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--border-primary); background: var(--bg-secondary); color: var(--text-secondary); font-size: 10px; font-weight: 800; cursor: pointer; }
+  .inline-mini-btn:hover { border-color: var(--border-focus); color: var(--accent-primary); background: var(--accent-primary-light); }
+  .inline-mini-btn.danger { color: #fb7185; border-color: rgba(251, 113, 133, .24); }
+  .inline-mini-btn.danger:hover { background: rgba(251, 113, 133, .1); border-color: rgba(251, 113, 133, .38); }
+  .field-hint { margin-top: -2px; color: var(--text-tertiary); font-size: 11px; line-height: 1.45; }
   .upload-area { margin-bottom: 16px; }
   .file-input { display: none; }
   .file-label { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; border: 2px dashed var(--border-primary); border-radius: 10px; cursor: pointer; transition: all 0.2s; color: var(--text-secondary); }
@@ -790,6 +1262,72 @@
   .cancel-btn { padding: 8px 16px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px; color: var(--text-secondary); font-size: 13px; cursor: pointer; }
   .submit-btn { padding: 8px 16px; background: var(--accent-primary); color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
   .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .upload-param-builder {
+    padding: 12px;
+    border: 1px solid var(--border-secondary);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, .34);
+  }
+
+  .param-empty {
+    padding: 10px 12px;
+    border: 1px dashed var(--border-secondary);
+    border-radius: 8px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+  }
+
+  .upload-param-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .upload-param-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.3fr) 102px minmax(120px, 1fr) 72px 56px;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .upload-param-row input,
+  .upload-param-row select {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    height: 34px;
+    padding: 0 9px;
+    border-radius: 7px;
+    border: 1px solid var(--border-primary);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+  }
+
+  .upload-param-row input:focus,
+  .upload-param-row select:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--accent-primary-light);
+  }
+
+  .param-required {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .param-required input {
+    width: 14px;
+    height: 14px;
+    min-width: 14px;
+    padding: 0;
+  }
 
   .card-badge {
     display: inline-flex;
@@ -860,6 +1398,27 @@
   .fav-chip.active .chip-count {
     background: rgba(251, 191, 36, 0.15) !important;
     color: #fbbf24 !important;
+  }
+
+  .failed-chip {
+    border-color: rgba(251, 113, 133, 0.16) !important;
+  }
+  .failed-chip.active {
+    background: rgba(251, 113, 133, 0.1) !important;
+    border-color: rgba(251, 113, 133, 0.34) !important;
+    color: #fb7185 !important;
+  }
+  .param-chip {
+    border-color: rgba(52, 211, 153, 0.16) !important;
+  }
+  .param-chip.active {
+    background: rgba(52, 211, 153, 0.1) !important;
+    border-color: rgba(52, 211, 153, 0.34) !important;
+    color: #34d399 !important;
+  }
+  .param-chip.active .chip-count {
+    background: rgba(52, 211, 153, 0.14) !important;
+    color: #34d399 !important;
   }
 
   .source-pill {
@@ -952,18 +1511,19 @@
   .row-fav-btn:hover { color: #fbbf24; background: rgba(251, 191, 36, 0.1); opacity: 1; }
   .row-fav-btn.faved { color: #fbbf24; opacity: 1; }
 
-  .row-badge {
+  .param-badge {
     display: inline-flex;
     align-items: center;
-    gap: 2px;
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(52, 211, 153, 0.24);
+    background: rgba(52, 211, 153, 0.09);
+    color: #34d399;
     font-size: 10px;
-    font-weight: 600;
-    color: #22d3ee;
-    background: rgba(34, 211, 238, 0.08);
-    border: 1px solid rgba(34, 211, 238, 0.15);
-    padding: 1px 6px;
-    border-radius: 8px;
-    margin-left: 2px;
+    font-weight: 800;
+    line-height: 1;
+    white-space: nowrap;
   }
 
   .view-btn {
@@ -1046,6 +1606,25 @@
   .search-clear:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+
+  .search-shortcut {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-grid;
+    place-items: center;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1px solid var(--border-primary);
+    background: var(--bg-secondary);
+    color: var(--text-tertiary);
+    font-family: var(--theme-font-family-mono);
+    font-size: 10px;
+    line-height: 1;
+    pointer-events: none;
   }
 
   .category-chips {
@@ -1332,16 +1911,6 @@
     gap: 8px;
   }
 
-  .card-cmd {
-    font-family: var(--theme-font-family-mono);
-    color: var(--text-tertiary);
-    padding: 3px 8px;
-    border-radius: 6px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-secondary);
-    font-size: 10px;
-  }
-
   .card-author {
     color: var(--text-tertiary);
     font-size: 10px;
@@ -1354,6 +1923,10 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .scripts-list-head {
+    display: none;
   }
 
   .script-row {
@@ -1418,12 +1991,6 @@
     color: var(--text-tertiary);
   }
 
-  .row-version {
-    font-size: 10px;
-    color: var(--text-tertiary);
-    font-family: var(--theme-font-family-mono);
-  }
-
   .row-desc {
     font-size: 12px;
     color: var(--text-secondary);
@@ -1441,14 +2008,98 @@
     white-space: nowrap;
   }
 
-  .row-cmd {
-    font-family: var(--theme-font-family-mono);
-    font-size: 11px;
-    color: #4b5563;
-    padding: 3px 8px;
-    border-radius: 5px;
-    background: rgba(0, 0, 0, 0.2);
+  .row-command {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .row-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    min-width: 42px;
+    padding: 0 7px;
+    border-radius: 7px;
+    border: 1px solid var(--border-secondary);
+    background: var(--bg-secondary);
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: all .16s ease;
+  }
+
+  .row-copy-btn:hover {
+    border-color: var(--border-focus);
+    background: var(--accent-primary-light);
+    color: var(--accent-primary);
+  }
+
+  .row-last {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .last-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    max-width: 100%;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, .18);
+    background: rgba(148, 163, 184, .08);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 900;
+    line-height: 1;
     white-space: nowrap;
+  }
+
+  .last-state.ok {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, .28);
+    background: rgba(52, 211, 153, .1);
+  }
+
+  .last-state.fail {
+    color: #fb7185;
+    border-color: rgba(251, 113, 133, .28);
+    background: rgba(251, 113, 133, .1);
+  }
+
+  .last-state.running {
+    color: #67e8f9;
+    border-color: rgba(103, 232, 249, .28);
+    background: rgba(103, 232, 249, .1);
+  }
+
+  .last-time {
+    min-width: 0;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+    color: var(--text-tertiary);
+    font-family: var(--theme-font-family-mono);
+    font-size: 10px;
+  }
+
+  .row-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    min-width: 0;
+    flex-wrap: nowrap;
   }
 
   .row-arrow {
@@ -1517,11 +2168,35 @@
     font-size: 12px;
   }
 
+  .summary-filter {
+    cursor: pointer;
+    font-weight: 800;
+    transition: all .16s ease;
+  }
+
+  .summary-filter:hover,
+  .summary-filter.active {
+    border-color: rgba(251, 113, 133, .34);
+    background: rgba(251, 113, 133, .1);
+    color: #fb7185;
+  }
+
   .header-right {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-left: auto;
+  }
+  .header-search {
+    width: min(360px, 32vw);
+    flex: 0 1 360px;
+  }
+  .header-search .search-input {
+    height: 34px;
+    padding-top: 0;
+    padding-bottom: 0;
+    font-size: 12px;
+    border-radius: 9px;
   }
 
   .upload-btn,
@@ -1581,7 +2256,7 @@
   }
 
   .filter-section {
-    padding: 14px;
+    padding: 10px;
     background: var(--bg-card);
     border: 1px solid var(--border-primary);
     border-radius: 10px;
@@ -1738,14 +2413,12 @@
   .row-desc,
   .card-author,
   .row-id,
-  .row-version,
   .card-version {
     color: var(--text-secondary);
   }
 
   .card-example,
-  .card-cmd,
-  .row-cmd {
+  .row-copy-btn {
     background: var(--bg-secondary);
     border-color: var(--border-secondary);
     color: var(--text-secondary);
@@ -1786,8 +2459,7 @@
     background: rgba(217, 119, 6, 0.1);
   }
 
-  .card-badge,
-  .row-badge {
+  .card-badge {
     color: var(--accent-primary);
     background: var(--accent-primary-light);
     border-color: transparent;
@@ -1803,6 +2475,213 @@
     transform: none;
   }
 
+  .scripts-list {
+    gap: 5px;
+    overflow-x: auto;
+    overflow-y: visible;
+    overscroll-behavior-x: contain;
+    padding-bottom: 4px;
+    --script-list-columns: 58px minmax(170px, .72fr) minmax(260px, 1fr) 92px 130px 150px 96px 132px 104px minmax(210px, 230px);
+    --script-list-min-width: 1380px;
+  }
+
+  .scripts-list-head {
+    display: grid;
+    grid-template-columns: var(--script-list-columns);
+    gap: 10px;
+    align-items: center;
+    min-width: var(--script-list-min-width);
+    padding: 0 12px 5px;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    text-align: center;
+  }
+
+  .script-row {
+    display: grid;
+    grid-template-columns: var(--script-list-columns);
+    gap: 10px;
+    min-width: var(--script-list-min-width);
+    min-height: 54px;
+    padding: 8px 12px;
+    border-radius: 9px;
+  }
+
+  .scripts-list-head span,
+  .script-row > span,
+  .script-row > div {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .row-name,
+  .row-feature {
+    text-align: left;
+  }
+
+  .script-row:hover {
+    border-color: rgba(34,211,238,.32);
+    background: linear-gradient(90deg, rgba(34,211,238,.055), var(--bg-card));
+  }
+
+  .scripts-list-head span:last-child,
+  .row-actions {
+    position: sticky;
+    right: 0;
+    z-index: 3;
+    padding-left: 8px;
+    background: linear-gradient(90deg, rgba(15, 23, 42, 0), var(--bg-card) 20%, var(--bg-card));
+    box-shadow: -10px 0 16px rgba(2, 6, 23, 0.18);
+  }
+
+  .scripts-list-head span:last-child {
+    z-index: 4;
+    text-align: right;
+    background: linear-gradient(90deg, rgba(15, 23, 42, 0), var(--bg-primary) 20%, var(--bg-primary));
+  }
+
+  .script-row:hover .row-actions {
+    background: linear-gradient(90deg, rgba(34,211,238,0), color-mix(in srgb, var(--bg-card) 82%, rgba(34,211,238,.16)) 22%, color-mix(in srgb, var(--bg-card) 82%, rgba(34,211,238,.16)));
+  }
+
+  .row-number {
+    min-width: 40px;
+    height: 24px;
+  }
+
+  .row-title {
+    max-width: 100%;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+
+  .row-name,
+  .row-feature {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .row-desc {
+    max-width: 100%;
+    display: block;
+    font-size: 11px;
+  }
+
+  .row-category {
+    min-width: 0;
+  }
+
+  .row-type,
+  .row-identity-cell,
+  .row-exec-count,
+  .row-last,
+  .row-command {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .row-last {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .type-pill,
+  .row-identity-cell,
+  .row-exec-count {
+    font-family: var(--theme-font-family-mono);
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .type-pill {
+    min-width: 66px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(34, 211, 238, .22);
+    background: rgba(34, 211, 238, .08);
+    color: #67e8f9;
+  }
+
+  .row-identity-cell {
+    flex-direction: column;
+    gap: 2px;
+    color: #a7f3d0;
+  }
+
+  .row-identity-cell .row-id,
+  .row-version-mini {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .row-version-mini {
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 700;
+  }
+
+  .row-exec-count {
+    color: #facc15;
+  }
+
+  .cat-pill {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+    padding: 3px 8px;
+    font-size: 10px;
+  }
+
+  .row-copy-btn {
+    height: 24px;
+    min-width: 38px;
+    padding: 0 6px;
+  }
+
+  .row-run-btn {
+    width: auto;
+    min-width: 54px;
+    height: 28px;
+    gap: 4px;
+    margin-left: 0;
+    background: linear-gradient(135deg, rgba(20,184,166,.22), rgba(34,211,238,.14));
+    padding: 0 9px;
+    font-size: 11px;
+    font-weight: 800;
+  }
+
+  .row-fav-btn {
+    width: 28px;
+    height: 28px;
+  }
+
+  .row-edit-btn,
+  .row-delete-btn {
+    height: 26px;
+    min-width: 40px;
+    padding: 0 7px;
+    font-size: 10px;
+  }
+
+  .row-arrow {
+    display: none;
+  }
+
   .modal-overlay {
     background: rgba(15, 18, 24, 0.55);
     backdrop-filter: blur(4px);
@@ -1811,6 +2690,118 @@
   .modal {
     border-radius: 10px;
     box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
+  }
+
+  .scripts-grid {
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 16px;
+  }
+
+  .script-card {
+    min-height: 250px;
+    padding: 0;
+  }
+
+  .card-inner {
+    display: grid;
+    grid-template-columns: 70px minmax(0, 1fr);
+    grid-template-areas:
+      "icon header"
+      "icon title"
+      "body body"
+      "example example"
+      "footer footer";
+    gap: 10px 14px;
+    height: 100%;
+    padding: 16px;
+  }
+
+  .card-header {
+    grid-area: header;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) repeat(4, auto);
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    min-width: 0;
+  }
+
+  .card-icon {
+    grid-area: icon;
+    width: 58px;
+    height: 58px;
+    align-self: start;
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: 0;
+  }
+
+  .script-number {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    min-width: 40px;
+    height: 22px;
+    z-index: 2;
+    background: rgba(2, 6, 23, 0.72);
+    color: #e2e8f0;
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .card-meta {
+    min-width: 0;
+    margin-right: 0;
+  }
+
+  .card-fav-btn,
+  .card-run-btn,
+  .card-edit-btn,
+  .card-delete-btn {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+  }
+
+  .card-edit-btn,
+  .card-delete-btn {
+    font-size: 10px;
+  }
+
+  .card-badge {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+  }
+
+  .card-title {
+    grid-area: title;
+    margin: 0;
+    align-self: end;
+    line-height: 1.35;
+  }
+
+  .card-feature,
+  .card-desc {
+    grid-column: 1 / -1;
+  }
+
+  .card-feature {
+    margin: 0;
+  }
+
+  .card-desc {
+    margin: 0;
+    min-height: 38px;
+  }
+
+  .card-example {
+    grid-area: example;
+    margin: 0;
+  }
+
+  .card-footer {
+    grid-area: footer;
+    padding-right: 54px;
   }
 
   @media (max-width: 768px) {
@@ -1826,10 +2817,630 @@
       flex-shrink: 0;
     }
     .page-header { flex-direction: column; align-items: flex-start; gap: 10px; }
-    .header-right { width: 100%; }
+    .header-right { width: 100%; flex-wrap: wrap; }
+    .header-search { width: 100%; flex-basis: 100%; }
     .sort-select { flex: 1; }
-    .script-card { padding: 14px; }
-    .script-row { padding: 10px 12px; }
-    .row-cmd { display: none; }
+    .script-card { padding: 0; }
+    .card-inner { grid-template-columns: 58px minmax(0, 1fr); padding: 14px; }
+    .card-icon { width: 48px; height: 48px; font-size: 11px; }
+    .card-header { grid-template-columns: minmax(0, 1fr) repeat(2, auto); }
+    .card-edit-btn, .card-delete-btn { display: none; }
+    .script-row { padding: 8px 12px; }
+    .row-edit-btn, .row-delete-btn { display: none; }
+  }
+
+  .scripts-grid {
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 14px;
+  }
+
+  .script-card {
+    min-height: 0;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 16px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.025), transparent 46%),
+      var(--bg-card);
+  }
+
+  .script-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    pointer-events: none;
+  }
+
+  .card-inner {
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-areas: none;
+    grid-auto-flow: row;
+    gap: 0;
+    min-height: 230px;
+    padding: 0;
+  }
+
+  .card-top,
+  .card-actions,
+  .card-body,
+  .card-footer {
+    grid-area: auto;
+    grid-column: 1 / -1;
+    width: auto;
+  }
+
+  .card-top {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 14px;
+    align-items: start;
+    padding: 16px 16px 12px;
+    border-bottom: 1px solid var(--border-secondary);
+  }
+
+  .card-icon {
+    grid-area: auto;
+    width: 58px;
+    height: 58px;
+    border-radius: 15px;
+    align-self: start;
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: .02em;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 12px 26px rgba(0,0,0,.18);
+  }
+
+  .card-head-main {
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+  }
+
+  .card-kicker {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .script-number {
+    position: static;
+    min-width: 44px;
+    height: 23px;
+    z-index: auto;
+    background: rgba(34,211,238,.1);
+    color: var(--accent-primary);
+    border-color: rgba(34,211,238,.22);
+  }
+
+  .card-title {
+    grid-area: auto;
+    margin: 0;
+    max-width: 100%;
+    color: var(--text-primary);
+    font-size: 17px;
+    font-weight: 800;
+    line-height: 1.25;
+    letter-spacing: -.01em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card-category,
+  .source-pill,
+  .card-version {
+    height: 23px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .card-actions {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-secondary);
+    background: color-mix(in srgb, var(--bg-secondary) 68%, transparent);
+  }
+
+  .card-actions .card-fav-btn,
+  .card-actions .card-run-btn,
+  .card-actions .card-edit-btn,
+  .card-actions .card-delete-btn {
+    position: static;
+    width: auto;
+    min-width: 34px;
+    height: 30px;
+    padding: 0 10px;
+    opacity: 1;
+    border-radius: 9px;
+    font-size: 11px;
+  }
+
+  .card-actions .card-run-btn {
+    min-width: 42px;
+    margin-left: 0;
+  }
+
+  .card-body {
+    padding: 14px 16px 12px;
+    min-height: 94px;
+  }
+
+  .card-feature {
+    grid-area: auto;
+    grid-column: auto;
+    margin: 0 0 7px;
+    color: var(--accent-primary);
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .card-desc {
+    grid-area: auto;
+    grid-column: auto;
+    margin: 0;
+    min-height: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.65;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .inline-badge {
+    position: static;
+    width: fit-content;
+    margin: 0 0 8px;
+  }
+
+  .card-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    margin-top: auto;
+    padding: 12px 16px 14px;
+    border-top: 1px solid var(--border-secondary);
+    background: rgba(2, 6, 23, 0.12);
+  }
+
+  .card-command {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .card-foot-meta {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+
+  .card-author,
+  .card-example-inline {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card-example {
+    display: none;
+  }
+
+  .card-badge {
+    position: static;
+  }
+
+  /* Compact density override: keep actions visible but remove oversized card mass. */
+  .scripts-grid {
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+  }
+  .card-inner {
+    min-height: 164px;
+  }
+  .card-top {
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 10px;
+    padding: 11px 12px 8px;
+  }
+  .card-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 11px;
+    font-size: 11px;
+  }
+  .card-kicker {
+    gap: 4px;
+  }
+  .script-number,
+  .card-category,
+  .source-pill,
+  .card-version {
+    height: 20px;
+    font-size: 9px;
+  }
+  .script-number {
+    min-width: 38px;
+  }
+  .card-title {
+    font-size: 14px;
+  }
+  .card-actions {
+    padding: 7px 12px;
+    gap: 5px;
+  }
+  .card-actions .card-fav-btn,
+  .card-actions .card-run-btn,
+  .card-actions .card-edit-btn,
+  .card-actions .card-delete-btn {
+    min-width: 28px;
+    height: 25px;
+    padding: 0 7px;
+  }
+  .card-body {
+    min-height: 38px;
+    padding: 8px 12px 7px;
+  }
+  .card-feature {
+    margin-bottom: 4px;
+    font-size: 11px;
+  }
+  .card-desc {
+    font-size: 11px;
+    line-height: 1.45;
+    -webkit-line-clamp: 1;
+  }
+  .card-footer {
+    display: none;
+  }
+  .card-foot-meta {
+    font-size: 9px;
+  }
+
+  .edit-file-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px 10px;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 8px;
+    border: 1px solid var(--border-secondary);
+    border-radius: 9px;
+    background: var(--bg-secondary);
+  }
+
+  .edit-file-label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(34, 211, 238, .24);
+    background: rgba(34, 211, 238, .08);
+    color: var(--accent-primary);
+    font-size: 12px;
+    font-weight: 900;
+    white-space: nowrap;
+    cursor: default;
+  }
+
+  .edit-file-row small {
+    min-width: 0;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .builtin-checkbox-toggle.active {
+    border-color: rgba(52, 211, 153, .38);
+    background: linear-gradient(135deg, rgba(16, 185, 129, .14), rgba(34, 211, 238, .1));
+    color: #a7f3d0;
+  }
+
+  .builtin-checkbox-toggle.active em {
+    background: rgba(16, 185, 129, .16);
+    color: #a7f3d0;
+  }
+
+  .scripts-list {
+    --script-list-columns: 42px 126px minmax(148px, 1fr) 60px 74px 102px 60px 42px 142px 52px 130px;
+    --script-list-min-width: 1032px;
+    gap: 4px;
+    padding-bottom: 6px;
+    overflow-x: auto;
+  }
+
+  .scripts-list-head,
+  .script-row {
+    display: grid;
+    grid-template-columns: var(--script-list-columns);
+    gap: 6px;
+    min-width: var(--script-list-min-width);
+  }
+
+  .scripts-list-head {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .script-row {
+    min-height: 42px;
+    padding: 5px 10px;
+    align-items: stretch;
+    border-radius: 8px;
+  }
+
+  .scripts-list-head > span,
+  .script-row > span,
+  .script-row > div {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+    text-align: center;
+  }
+
+  .scripts-list-head > span {
+    font-size: 10px;
+    font-weight: 900;
+  }
+
+  .row-name,
+  .row-feature,
+  .scripts-list-head > span:nth-child(2),
+  .scripts-list-head > span:nth-child(3) {
+    justify-content: flex-start !important;
+    text-align: left !important;
+  }
+
+  .row-title {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .row-desc {
+    font-size: 10px;
+  }
+
+  .row-title,
+  .row-desc,
+  .row-id,
+  .row-version-mini,
+  .last-time {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .row-status-cell,
+  .row-exec-count,
+  .row-time-cell {
+    justify-content: center !important;
+    text-align: center !important;
+    font-family: var(--theme-font-family-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .last-state {
+    width: min(100%, 54px);
+    height: 18px;
+    padding: 0 4px;
+    font-size: 9px;
+  }
+
+  .row-time-cell .last-time {
+    width: 100%;
+    text-align: center;
+    font-size: 9px;
+  }
+
+  .type-pill,
+  .cat-pill,
+  .row-copy-btn,
+  .row-run-btn,
+  .row-edit-btn,
+  .row-delete-btn {
+    height: 22px;
+    font-size: 9px;
+  }
+
+  .type-pill {
+    min-width: 50px;
+    padding: 0 6px;
+  }
+
+  .cat-pill {
+    padding: 0 6px;
+  }
+
+  .row-identity-cell {
+    display: grid !important;
+    align-content: center;
+    justify-items: center;
+    gap: 1px;
+    font-family: var(--theme-font-family-mono);
+  }
+
+  .row-id {
+    font-size: 10px;
+  }
+
+  .row-version-mini {
+    font-size: 9px;
+  }
+
+  .row-actions {
+    position: static !important;
+    right: auto !important;
+    z-index: auto !important;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    padding-left: 0;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .scripts-list-head span:last-child {
+    position: static !important;
+    right: auto !important;
+    z-index: auto !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .row-copy-btn {
+    min-width: 42px;
+    padding: 0 4px;
+  }
+
+  .row-run-btn {
+    width: auto;
+    min-width: 38px;
+    padding: 0 4px;
+    margin-left: 0;
+    gap: 3px;
+  }
+
+  .row-fav-btn {
+    width: 20px;
+    height: 22px;
+    font-size: 11px;
+  }
+
+  .row-edit-btn,
+  .row-delete-btn {
+    min-width: 28px;
+    padding: 0 3px;
+  }
+
+  .row-actions button {
+    flex: 0 0 auto;
+  }
+
+  .upload-script-modal {
+    width: min(860px, 94vw) !important;
+    max-height: 90vh;
+  }
+
+  .upload-script-modal .modal-body,
+  .upload-script-modal .advanced-panel,
+  .upload-script-modal .upload-param-builder,
+  .upload-script-modal .upload-param-list {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  .upload-script-modal .field-title-row {
+    min-width: 0;
+    row-gap: 6px;
+  }
+
+  .upload-param-list {
+    overflow: visible;
+  }
+
+  .upload-param-row {
+    display: grid !important;
+    grid-template-columns: minmax(112px, 1fr) minmax(168px, 1.25fr) 96px minmax(112px, 1fr) 68px 54px !important;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  .upload-param-row input,
+  .upload-param-row select,
+  .upload-param-row button {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  .upload-param-row .param-required {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .upload-param-row .inline-mini-btn {
+    width: 54px;
+    padding: 0 4px;
+  }
+
+  @media (max-width: 860px) {
+    .upload-script-modal {
+      width: min(620px, 94vw) !important;
+    }
+
+    .upload-param-row {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    }
+
+    .upload-param-row .param-required,
+    .upload-param-row .inline-mini-btn {
+      min-height: 32px;
+      width: 100%;
+      justify-content: center;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .upload-script-modal {
+      width: 94vw !important;
+    }
+
+    .upload-script-modal .modal-body {
+      padding: 14px;
+    }
+
+    .upload-script-modal .advanced-panel {
+      padding: 10px;
+    }
+
+    .upload-param-row {
+      grid-template-columns: minmax(0, 1fr) !important;
+    }
+  }
+
+  @media (max-width: 768px) {
+    .scripts-grid {
+      grid-template-columns: 1fr;
+    }
+    .card-top {
+      grid-template-columns: 50px minmax(0, 1fr);
+    }
+    .card-icon {
+      width: 50px;
+      height: 50px;
+    }
+    .card-actions {
+      flex-wrap: wrap;
+    }
   }
 </style>

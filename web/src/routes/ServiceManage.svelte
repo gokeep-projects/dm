@@ -1,15 +1,17 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   
   let services = $state([]);
   let loading = $state(true);
+  let loadPercent = $state(0);
+  let loadTimer = null;
   let error = $state(null);
   let summary = $state(null);
   let filterCategory = $state('');
   let filterStatus = $state('');
   let search = $state('');
-  let sortKey = $state('name');
-  let sortDir = $state('asc');
+  let sortKey = $state('priority');
+  let sortDir = $state('desc');
   let actionLoading = $state({});
   let actionResult = $state({});
   let showLogs = $state(false);
@@ -21,13 +23,33 @@
   let healthResult = $state(null);
   let healthLoading = $state(false);
   let showFilters = $state(false);
+  let columnWidths = $state({
+    index: 44,
+    pid: 64,
+    name: 150,
+    process: 110,
+    path: 360,
+    ports: 92,
+    status: 96,
+    cpu: 64,
+    memory: 82,
+    category: 104,
+    unitState: 136,
+    logAnomaly: 230,
+    actions: 190,
+  });
 
   async function load() {
     loading = true;
+    loadPercent = 8;
+    if (loadTimer) clearInterval(loadTimer);
+    loadTimer = setInterval(() => {
+      loadPercent = Math.min(92, loadPercent + Math.max(1, Math.round((96 - loadPercent) / 8)));
+    }, 180);
     error = null;
     try {
       const r = await fetch('/api/checks/service-manage');
-      if (!r.ok) { error = '加载失败'; loading = false; return; }
+      if (!r.ok) { error = '加载失败'; loading = false; clearInterval(loadTimer); return; }
       const d = await r.json();
       const tableSection = d.sections?.find(s => s.title === '服务列表');
       const summarySection = d.sections?.find(s => s.title === '服务汇总');
@@ -51,10 +73,15 @@
             cpu: r[7],
             memory: r[8],
             category: r[9],
+            unitState: r[10] || '-',
+            logAnomaly: r[11] || '-',
           }));
         }
       }
     } catch (e) { error = e.message; }
+    loadPercent = 100;
+    if (loadTimer) { clearInterval(loadTimer); loadTimer = null; }
+    setTimeout(() => loadPercent = loading ? loadPercent : 0, 360);
     loading = false;
   }
 
@@ -87,13 +114,37 @@
     if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
     else {
       sortKey = key;
-      sortDir = key === 'cpu' || key === 'memory' ? 'desc' : 'asc';
+      sortDir = key === 'cpu' || key === 'memory' || key === 'priority' ? 'desc' : 'asc';
     }
   }
 
   function sortMark(key) {
     if (sortKey !== key) return '';
     return sortDir === 'asc' ? ' ↑' : ' ↓';
+  }
+
+  function colStyle(key) {
+    return `width:${columnWidths[key] || 100}px`;
+  }
+
+  function startColumnResize(event, key) {
+    if (key === 'actions') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = columnWidths[key] || 100;
+    const onMove = (moveEvent) => {
+      const minWidth = key === 'path' || key === 'logAnomaly' ? 180 : 48;
+      columnWidths = { ...columnWidths, [key]: Math.max(minWidth, startWidth + moveEvent.clientX - startX) };
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('resizing-column');
+    };
+    document.body.classList.add('resizing-column');
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
   }
 
   function parsePercent(v) {
@@ -118,9 +169,13 @@
     if (value) {
       if (rawKey === 'pid') return String(s.pid || '').includes(value);
       if (rawKey === 'port' || rawKey === 'ports') return String(s.ports || '').toLowerCase().includes(value);
+      if (rawKey === 'listen' || rawKey === 'listening') return value ? String(s.ports || '').toLowerCase().includes(value) : hasListeningPort(s);
       if (rawKey === 'name' || rawKey === 'service') return String(s.name || '').toLowerCase().includes(value);
+      if (rawKey === 'process' || rawKey === 'proc') return String(s.process || '').toLowerCase().includes(value);
       if (rawKey === 'path' || rawKey === 'cmd') return String(s.path || '').toLowerCase().includes(value);
       if (rawKey === 'cat' || rawKey === 'category' || rawKey === 'type') return String(s.category || '').toLowerCase().includes(value);
+      if (rawKey === 'unit' || rawKey === 'systemd') return String(s.unitState || '').toLowerCase().includes(value);
+      if (rawKey === 'log' || rawKey === 'anomaly') return String(s.logAnomaly || '').toLowerCase().includes(value);
       if (rawKey === 'status') {
         const running = s.status?.includes('运行中');
         if (['running', 'run', 'up', 'active', '运行'].includes(value)) return running;
@@ -148,15 +203,23 @@
       s.cpu,
       s.memory,
       s.category,
+      s.unitState,
+      s.logAnomaly,
     ].some(v => String(v || '').toLowerCase().includes(t));
   }
 
   function serviceSortValue(s, key) {
+    if (key === 'priority') return (hasListeningPort(s) ? 1_000_000 : 0) + parsePercent(s.cpu) * 1000 + parseMemory(s.memory);
     if (key === 'pid') return Number(s.pid) || 0;
     if (key === 'status') return s.status?.includes('运行中') ? 0 : 1;
     if (key === 'cpu') return parsePercent(s.cpu);
     if (key === 'memory') return parseMemory(s.memory);
     return s[key] || '';
+  }
+
+  function hasListeningPort(s) {
+    const value = String(s.ports || '').trim();
+    return Boolean(value && value !== '-' && value !== '无' && value !== 'N/A');
   }
 
   async function viewLogs(service) {
@@ -184,13 +247,22 @@
     logLoading = false;
   }
 
-  async function checkHealth(name) {
+  async function checkHealth(service) {
+    const name = typeof service === 'string' ? service : service?.name;
+    if (!name) return;
     healthService = name;
     showHealth = true;
     healthLoading = true;
     healthResult = null;
     try {
-      const r = await fetch(`/api/services/${encodeURIComponent(name)}/health`);
+      const params = new URLSearchParams();
+      if (service?.pid) params.set('pid', service.pid);
+      if (service?.process) params.set('process', service.process);
+      if (service?.path) params.set('path', service.path);
+      if (service?.category) params.set('category', service.category);
+      if (service?.ports) params.set('ports', service.ports);
+      const qs = params.toString();
+      const r = await fetch(`/api/services/${encodeURIComponent(name)}/health${qs ? '?' + qs : ''}`);
       if (r.ok) {
         healthResult = await r.json();
       }
@@ -228,6 +300,9 @@
   let stoppedCount = $derived(services.length - runningCount);
 
   onMount(load);
+  onDestroy(() => {
+    if (loadTimer) clearInterval(loadTimer);
+  });
 </script>
 
 <div class="service-page">
@@ -238,7 +313,7 @@
     <div class="header-right">
       <div class="search-wrap">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35" stroke-linecap="round"/></svg>
-        <input type="text" placeholder="name/nginx pid:123 port:8080 cpu>10 mem>500 status:running" bind:value={search} class="search-input" />
+        <input type="text" placeholder="name:nginx listen: port:8080 process:java cpu>10 mem>500 status:running" bind:value={search} class="search-input" />
         {#if search}
           <button class="search-clear" onclick={() => search = ''}>✕</button>
         {/if}
@@ -260,8 +335,9 @@
       <span class="filter-label">快捷</span>
       <button class="filter-pill" onclick={() => search = 'cpu>10'}>CPU&gt;10%</button>
       <button class="filter-pill" onclick={() => search = 'mem>500'}>内存&gt;500MB</button>
-      <button class="filter-pill" onclick={() => search = 'port:'}>端口</button>
+      <button class="filter-pill" onclick={() => search = 'listen:'}>有端口</button>
       <button class="filter-pill" onclick={() => search = 'status:running'}>运行服务</button>
+      <button class="filter-pill" onclick={() => { sortKey = 'priority'; sortDir = 'desc'; }}>默认排序</button>
     </div>
     <div class="filter-group">
       <span class="filter-label">状态</span>
@@ -302,59 +378,75 @@
   {/if}
 
   {#if loading}
-    <div class="loading"><div class="spinner"></div><span>加载中...</span></div>
+    <div class="service-loading">
+      <div class="service-loader">
+        <div class="loader-ring"></div>
+        <div class="loader-core">{loadPercent}%</div>
+      </div>
+      <div class="loader-copy">
+        <strong>正在扫描服务拓扑</strong>
+        <span>进程、端口、systemd、日志异常同步分析中</span>
+        <div class="loader-track"><i style="width:{loadPercent}%"></i></div>
+      </div>
+    </div>
   {:else if filtered.length === 0}
     <div class="empty-state">
       <span class="empty-icon">🔧</span>
       <span class="empty-text">没有匹配的服务</span>
     </div>
   {:else}
-    <div class="table-wrap">
-      <table class="service-table">
+    <div class="table-wrap table-scroll" aria-label="服务管理列表，可横向拖动查看全部列">
+      <table class="service-table" data-sticky-action="true">
         <colgroup>
-          <col class="col-index" />
-          <col class="col-pid" />
-          <col class="col-name" />
-          <col class="col-process" />
-          <col class="col-path" />
-          <col class="col-ports" />
-          <col class="col-status" />
-          <col class="col-cpu" />
-          <col class="col-memory" />
-          <col class="col-category" />
-          <col class="col-actions" />
+          <col class="col-index" style={colStyle('index')} />
+          <col class="col-pid" style={colStyle('pid')} />
+          <col class="col-name" style={colStyle('name')} />
+          <col class="col-process" style={colStyle('process')} />
+          <col class="col-path" style={colStyle('path')} />
+          <col class="col-ports" style={colStyle('ports')} />
+          <col class="col-status" style={colStyle('status')} />
+          <col class="col-cpu" style={colStyle('cpu')} />
+          <col class="col-memory" style={colStyle('memory')} />
+          <col class="col-category" style={colStyle('category')} />
+          <col class="col-unit" style={colStyle('unitState')} />
+          <col class="col-log-anomaly" style={colStyle('logAnomaly')} />
+          <col class="col-actions" style={colStyle('actions')} />
         </colgroup>
         <thead>
           <tr>
-            <th>#</th>
-            <th><button class="th-sort" onclick={() => changeSort('pid')}>PID{sortMark('pid')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('name')}>服务名{sortMark('name')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('process')}>进程{sortMark('process')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('path')}>进程路径{sortMark('path')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('ports')}>端口{sortMark('ports')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('status')}>状态{sortMark('status')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('cpu')}>CPU{sortMark('cpu')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('memory')}>内存{sortMark('memory')}</button></th>
-            <th><button class="th-sort" onclick={() => changeSort('category')}>类型{sortMark('category')}</button></th>
+            <th><button class="th-sort" onclick={() => changeSort('priority')}># {sortMark('priority')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'index')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('pid')}>PID{sortMark('pid')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'pid')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('name')}>服务名{sortMark('name')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'name')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('process')}>进程{sortMark('process')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'process')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('path')}>路径/配置{sortMark('path')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'path')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('ports')}>端口{sortMark('ports')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'ports')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('status')}>状态{sortMark('status')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'status')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('cpu')}>CPU{sortMark('cpu')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'cpu')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('memory')}>内存{sortMark('memory')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'memory')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('category')}>类型{sortMark('category')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'category')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('unitState')}>Systemd{sortMark('unitState')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'unitState')}></button></th>
+            <th><button class="th-sort" onclick={() => changeSort('logAnomaly')}>异常日志{sortMark('logAnomaly')}</button><button type="button" class="col-resizer" aria-label="拖动调整列宽" onpointerdown={(e) => startColumnResize(e, 'logAnomaly')}></button></th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
           {#each filtered as s, i}
             <tr class:row-running={s.status?.includes('运行中')}>
-              <td class="cell-index">{s.index}</td>
-              <td class="cell-pid">{s.pid}</td>
-              <td class="cell-name">{s.name}</td>
+              <td class="cell-index" title={s.index}>{s.index}</td>
+              <td class="cell-pid" title={s.pid}>{s.pid}</td>
+              <td class="cell-name" title={s.name}>{s.name}</td>
               <td class="cell-process" title={s.process}>{s.process || '-'}</td>
               <td class="cell-path" title={s.path}>{s.path}</td>
-              <td class="cell-ports">{s.ports}</td>
-              <td class="cell-status">
+              <td class="cell-ports" title={s.ports}>{s.ports}</td>
+              <td class="cell-status" title={s.status}>
                 <span class="status-dot" class:dot-running={s.status?.includes('运行中')}></span>
                 {s.status}
               </td>
-              <td class="cell-cpu">{s.cpu}</td>
-              <td class="cell-mem">{s.memory}</td>
-              <td class="cell-cat"><span class="cat-badge">{s.category}</span></td>
+              <td class="cell-cpu" title={s.cpu}>{s.cpu}</td>
+              <td class="cell-mem" title={s.memory}>{s.memory}</td>
+              <td class="cell-cat" title={s.category}><span class="cat-badge">{s.category}</span></td>
+              <td class="cell-unit" title={s.unitState}>{s.unitState}</td>
+              <td class="cell-log-anomaly" title={s.logAnomaly}>{s.logAnomaly}</td>
               <td class="cell-actions">
                 <div class="action-group">
                   {#if s.status?.includes('运行中')}
@@ -370,7 +462,7 @@
                     </button>
                   {/if}
                   <button class="act-btn act-log" onclick={() => viewLogs(s)}>日志</button>
-                  <button class="act-btn act-health" onclick={() => checkHealth(s.name)}>健康</button>
+                  <button class="act-btn act-health" onclick={() => checkHealth(s)}>健康</button>
                 </div>
               </td>
             </tr>
@@ -411,7 +503,7 @@
               </button>
             {/if}
             <button class="act-btn act-log" onclick={() => viewLogs(s)}>日志</button>
-            <button class="act-btn act-health" onclick={() => checkHealth(s.name)}>健康</button>
+            <button class="act-btn act-health" onclick={() => checkHealth(s)}>健康</button>
           </div>
         </div>
       {/each}
@@ -477,8 +569,53 @@
                     <span class="detail-label">是否运行</span>
                     <span class="detail-value" style="color:{healthResult.is_running ? '#10b981' : '#ef4444'}">{healthResult.is_running ? '是' : '否'}</span>
                   </div>
+                  <div class="detail-row">
+                    <span class="detail-label">匹配进程</span>
+                    <span class="detail-value">{healthResult.process || healthService}</span>
+                  </div>
+                  {#if healthResult.query_context?.category || healthResult.query_context?.ports}
+                    <div class="detail-row">
+                      <span class="detail-label">列表上下文</span>
+                      <span class="detail-value">{healthResult.query_context?.category || '-'} / {healthResult.query_context?.ports || '-'}</span>
+                    </div>
+                  {/if}
+                  {#if healthResult.executable_path}
+                    <div class="detail-row">
+                      <span class="detail-label">程序路径</span>
+                      <span class="detail-value" style="color:{healthResult.executable_exists ? '#10b981' : '#f59e0b'}">{healthResult.executable_path}</span>
+                    </div>
+                  {/if}
+                  {#if healthResult.systemd_properties}
+                    <div class="detail-row">
+                      <span class="detail-label">Unit</span>
+                      <span class="detail-value">{healthResult.systemd_properties.Id || healthService}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Load/Active/Sub</span>
+                      <span class="detail-value">{healthResult.systemd_properties.LoadState || '-'} / {healthResult.systemd_properties.ActiveState || '-'} / {healthResult.systemd_properties.SubState || '-'}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">配置文件</span>
+                      <span class="detail-value">{healthResult.systemd_properties.FragmentPath || '-'}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">退出码</span>
+                      <span class="detail-value">{healthResult.systemd_properties.ExecMainStatus || '0'}</span>
+                    </div>
+                  {/if}
                 </div>
               </div>
+
+              {#if healthResult.issues && healthResult.issues.length > 0}
+                <div class="health-detail-section issue-section">
+                  <h4>异常判断</h4>
+                  <div class="issue-list">
+                    {#each healthResult.issues as issue}
+                      <div class="issue-pill">{issue}</div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
 
               {#if healthResult.pids && healthResult.pids.length > 0}
                 <div class="health-detail-section">
@@ -534,6 +671,26 @@
                   </div>
                 </div>
               {/if}
+              {#if healthResult.recent_log_issues && healthResult.recent_log_issues.length > 0}
+                <div class="health-detail-section">
+                  <h4>最近异常日志</h4>
+                  <div class="health-log-issues">
+                    {#each healthResult.recent_log_issues as line}
+                      <pre>{line}</pre>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#if healthResult.recommendations && healthResult.recommendations.length > 0}
+                <div class="health-detail-section">
+                  <h4>建议命令</h4>
+                  <div class="health-log-issues commands">
+                    {#each healthResult.recommendations as line}
+                      <pre>$ {line}</pre>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
             </div>
           </div>
         {/if}
@@ -569,8 +726,9 @@
   .filter-pill.active .pill-count { color: inherit; background: rgba(255,255,255,0.08); }
   .filter-summary { display: flex; gap: 10px; margin-left: auto; color: var(--text-tertiary); font-size: 11px; font-family: var(--theme-font-family-mono); }
 
-  .table-wrap { overflow-x: auto; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; }
-  .service-table { width: 100%; min-width: 930px; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
+  .table-wrap { overflow-x: auto; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; cursor: grab; }
+  :global(.table-wrap.drag-scrolling) { cursor: grabbing; user-select: none; }
+  .service-table { width: 100%; min-width: 1720px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; }
   .service-table .col-index { width: 32px; }
   .service-table .col-pid { width: 54px; }
   .service-table .col-name { width: 126px; }
@@ -581,10 +739,16 @@
   .service-table .col-cpu { width: 48px; }
   .service-table .col-memory { width: 66px; }
   .service-table .col-category { width: 72px; }
+  .service-table .col-unit { width: 136px; }
+  .service-table .col-log-anomaly { width: 230px; }
   .service-table .col-actions { width: 182px; }
-  .service-table th { text-align: left; padding: 10px 8px; color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0; border-bottom: 1px solid var(--border-primary); background: var(--bg-secondary); position: sticky; top: 0; z-index: 1; }
+  .service-table th { text-align: left; padding: 10px 14px 10px 8px; color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0; border-bottom: 1px solid var(--border-primary); background: var(--bg-secondary); position: sticky; top: 0; z-index: 1; }
   .th-sort { border: none; background: transparent; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; padding: 0; cursor: pointer; }
   .th-sort:hover { color: var(--text-primary); }
+  .col-resizer { position: absolute; top: 0; right: 0; width: 8px; height: 100%; padding: 0; border: 0; background: transparent; cursor: col-resize; touch-action: none; }
+  .col-resizer::after { content: ""; position: absolute; top: 20%; bottom: 20%; right: 3px; width: 1px; border-radius: 999px; background: rgba(148, 163, 184, 0.26); }
+  .col-resizer:hover::after { background: #22d3ee; box-shadow: 0 0 10px rgba(34,211,238,.45); }
+  :global(body.resizing-column) { cursor: col-resize; user-select: none; }
   .service-table td { padding: 9px 8px; border-bottom: 1px solid var(--border-secondary); color: var(--text-primary); vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
   .service-table tr:hover td { background: var(--bg-hover); }
   .service-table .row-running td { background: rgba(52, 211, 153, 0.02); }
@@ -594,6 +758,8 @@
   .cell-name { font-weight: 600; color: var(--text-primary); white-space: nowrap; }
   .cell-process { font-family: var(--theme-font-family-mono); font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-path { font-family: var(--theme-font-family-mono); font-size: 11px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-unit, .cell-log-anomaly { font-family: var(--theme-font-family-mono); font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-log-anomaly:not(:empty) { color: #fbbf24; }
   .cell-ports { font-family: var(--theme-font-family-mono); color: #22d3ee; white-space: nowrap; }
   .cell-status { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #ef4444; }
@@ -602,6 +768,16 @@
   .cell-mem { font-family: var(--theme-font-family-mono); font-variant-numeric: tabular-nums; }
   .cat-badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; background: var(--bg-secondary); border: 1px solid var(--border-primary); white-space: nowrap; }
 
+  .service-table th:last-child,
+  .service-table td:last-child {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+    background: var(--bg-card);
+    box-shadow: -10px 0 18px rgba(2, 6, 23, .18);
+  }
+  .service-table th:last-child { z-index: 3; background: var(--bg-secondary); }
+  .service-table tr:hover td:last-child { background: var(--bg-hover); }
   .cell-actions { white-space: nowrap; }
   .action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
   .act-btn { min-width: 34px; padding: 4px 5px; border-radius: 4px; border: 1px solid var(--border-primary); background: var(--bg-secondary); color: var(--text-secondary); font-size: 11px; cursor: pointer; transition: all 0.15s; }
@@ -677,10 +853,26 @@
   .cmd-val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
   .ports-list { display: flex; flex-wrap: wrap; gap: 6px; }
   .port-item { font-family: var(--theme-font-family-mono); font-size: 12px; color: var(--text-secondary); background: var(--bg-primary); padding: 4px 8px; border-radius: 6px; }
+  .issue-section { border-color: rgba(248, 113, 113, .28); background: rgba(127, 29, 29, .12); }
+  .issue-list { display: flex; flex-wrap: wrap; gap: 7px; }
+  .issue-pill { padding: 6px 9px; border-radius: 999px; border: 1px solid rgba(248, 113, 113, .28); background: rgba(248, 113, 113, .1); color: #fecaca; font-size: 12px; font-weight: 800; }
+  .health-log-issues { display: grid; gap: 7px; }
+  .health-log-issues pre { margin: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, .14); background: #0b1020; color: #e2e8f0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }
+  .health-log-issues.commands pre { color: #bbf7d0; }
 
-  .loading { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 60px 0; color: var(--text-secondary); font-size: 14px; }
-  .spinner { width: 24px; height: 24px; border-radius: 50%; border: 3px solid var(--border-primary); border-top-color: var(--accent-primary); animation: spin 0.8s linear infinite; }
+  .service-loading { min-height: 320px; display: flex; align-items: center; justify-content: center; gap: 22px; padding: 40px; border: 1px solid rgba(34,211,238,.18); border-radius: 16px; background: radial-gradient(circle at 35% 20%, rgba(34,211,238,.16), transparent 36%), linear-gradient(135deg, rgba(15,23,42,.84), rgba(2,6,23,.92)); box-shadow: inset 0 0 44px rgba(34,211,238,.04); }
+  .service-loader { position: relative; width: 112px; height: 112px; flex-shrink: 0; display: grid; place-items: center; }
+  .loader-ring { position: absolute; inset: 0; border-radius: 50%; border: 3px solid rgba(34,211,238,.14); border-top-color: #67e8f9; border-right-color: #34d399; animation: spin .74s linear infinite; box-shadow: 0 0 28px rgba(34,211,238,.18); }
+  .loader-ring::before { content: ''; position: absolute; inset: 12px; border-radius: inherit; border: 1px solid rgba(251,191,36,.22); border-left-color: #fbbf24; animation: spinReverse 1.4s linear infinite; }
+  .loader-core { position: relative; z-index: 1; width: 72px; height: 72px; display: grid; place-items: center; border-radius: 50%; background: rgba(2,6,23,.82); color: #e0f2fe; font-family: var(--theme-font-family-mono); font-size: 18px; font-weight: 900; border: 1px solid rgba(148,163,184,.16); }
+  .loader-copy { min-width: 260px; display: grid; gap: 8px; }
+  .loader-copy strong { color: var(--text-primary); font-size: 18px; }
+  .loader-copy span { color: var(--text-secondary); font-size: 13px; }
+  .loader-track { height: 8px; overflow: hidden; border-radius: 999px; background: rgba(148,163,184,.14); }
+  .loader-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #22d3ee, #34d399, #fbbf24); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; transition: width .24s ease; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes spinReverse { to { transform: rotate(-360deg); } }
+  @keyframes shimmer { to { background-position: 200% 0; } }
   .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 80px 0; color: var(--text-secondary); }
   .empty-icon { font-size: 48px; opacity: 0.5; }
   .empty-text { font-size: 15px; color: var(--text-secondary); }

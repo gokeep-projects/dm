@@ -11,6 +11,7 @@
   import CheckImportReport from './routes/CheckImportReport.svelte';
   import Knowledge from './routes/Knowledge.svelte';
   import ServiceManage from './routes/ServiceManage.svelte';
+  import TrafficAnalysis from './routes/TrafficAnalysis.svelte';
   import Help from './routes/Help.svelte';
   import Alerts from './routes/Alerts.svelte';
   import Settings from './routes/Settings.svelte';
@@ -33,7 +34,6 @@
   let lang = $state('zh');
   let alertCount = $state(0);
   let showAlerts = $state(false);
-  let showAbout = $state(false);
   let alerts = $state([]);
   let alertsLoading = $state(false);
 
@@ -79,6 +79,11 @@
   function firstEvidence(alert) {
     const ev = alert.evidence || [];
     return ev.length ? ev[0] : '';
+  }
+
+  function compactCount(value) {
+    const n = Number(value || 0);
+    return n > 500 ? '500+' : String(n);
   }
 
   async function openPalette() {
@@ -159,6 +164,46 @@
     if (e.key === '[') { e.preventDefault(); sidebar = !sidebar; return; }
   }
 
+  function attachTableDragScroll() {
+    let active = null;
+    const selector = '.table-scroll, .table-wrap, .item-table, .result-table, .proc-table, .process-table';
+    const interactive = 'button, a, input, textarea, select, summary, details';
+    const onPointerDown = (event) => {
+      if (event.button !== 0 || event.target.closest(interactive)) return;
+      const el = event.target.closest(selector);
+      if (!el || el.scrollWidth <= el.clientWidth) return;
+      active = {
+        el,
+        x: event.clientX,
+        left: el.scrollLeft,
+        moved: false,
+      };
+      el.classList.add('drag-scrolling');
+    };
+    const onPointerMove = (event) => {
+      if (!active) return;
+      const delta = event.clientX - active.x;
+      if (Math.abs(delta) > 3) active.moved = true;
+      active.el.scrollLeft = active.left - delta;
+      if (active.moved) event.preventDefault();
+    };
+    const stop = () => {
+      if (!active) return;
+      active.el.classList.remove('drag-scrolling');
+      active = null;
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+  }
+
   onMount(() => {
     const savedTheme = localStorage.getItem('dm-theme') || 'dark';
     theme = savedTheme;
@@ -174,9 +219,11 @@
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('dm-alerts-refresh', loadAlerts);
     loadAlerts();
+    const detachTableDragScroll = attachTableDragScroll();
     const alertTimer = setInterval(loadAlerts, 5000);
     return () => {
       clearInterval(alertTimer);
+      detachTableDragScroll();
       window.removeEventListener('dm-alerts-refresh', loadAlerts);
       window.removeEventListener('keydown', onKeyDown);
     };
@@ -214,12 +261,13 @@
     { id: 'dashboard', label: t('nav.dashboard', lang), icon: 'dashboard' },
     { id: 'checks', label: t('nav.checks', lang), icon: 'search' },
     { id: 'services', label: t('nav.services', lang), icon: 'tool' },
+    { id: 'traffic', label: '流量分析', icon: 'traffic' },
     { id: 'scripts', label: t('nav.scripts', lang), icon: 'play' },
     { id: 'knowledge', label: '维护管理', icon: 'book' },
     { id: 'alerts', label: '系统告警', icon: 'bell' },
     { id: 'rules', label: '规则引擎', icon: 'rules' },
-    { id: 'settings', label: '系统设置', icon: 'settings' },
     { id: 'help', label: t('nav.help', lang), icon: 'help' },
+    { id: 'settings', label: '系统设置', icon: 'settings' },
   ]);
 
   const pageTitle = $derived.by(() => {
@@ -233,15 +281,16 @@
 
   function iconPath(name) {
     const paths = {
-      dashboard: 'M3 13h8V3H3v10Zm10 8h8V3h-8v18ZM3 21h8v-6H3v6Z',
-      search: 'M11 19a8 8 0 1 1 5.3-2l4.3 4.3',
-      tool: 'M14.7 6.3a4 4 0 0 0-5 5L4 17v3h3l5.7-5.7a4 4 0 0 0 5-5l-2.5 2.5-3-3 2.5-2.5Z',
-      play: 'M8 5v14l11-7-11-7Z',
-      book: 'M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H7a3 3 0 0 0-3 3V5.5Zm0 0V22',
-      bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8Zm-5 12a2 2 0 0 1-2 0',
-      rules: 'M4 6h16M4 12h16M4 18h7M8 6v12M16 6v6M14 16l2 2 4-5',
-      settings: 'M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5ZM19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.4 1a7.3 7.3 0 0 0-2-1.2L14.2 3h-4.4l-.4 2.6a7.3 7.3 0 0 0-2 1.2l-2.4-1-2 3.5 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.5 2.4-1a7.3 7.3 0 0 0 2 1.2l.4 2.6h4.4l.4-2.6a7.3 7.3 0 0 0 2-1.2l2.4 1 2-3.5-2-1.5c.1-.4.1-.8.1-1.2Z',
-      help: 'M9.1 9a3 3 0 1 1 5.8 1c-.5 1.2-1.9 1.7-2.5 2.7-.3.4-.4.8-.4 1.3M12 18h.01'
+      dashboard: 'M4 6.5 12 3l8 3.5v7L12 21l-8-7.5v-7Zm4 1.4 4 1.8 4-1.8M8 13.7l4 2.9 4-2.9M12 9.7v6.9',
+      search: 'M5 11.5a6.5 6.5 0 1 1 11.1 4.6L21 21M8.5 11.5h7M12 8v7M10 3.7 12 2l2 1.7',
+      tool: 'M6 19 19 6M8 21H4v-4l9.5-9.5m3.2-3.2 1.6-1.6 2.7 2.7-1.6 1.6M14 19h6M17 16v6M4 8h6M7 5v6',
+      traffic: 'M3 12h3l2-7 4 14 3-9 2 5h4M5 5h4m10 0h-4M5 19h4m10 0h-4M9 5v3m6-3v3M9 16v3m6-3v3',
+      play: 'M6 5.5 19 12 6 18.5v-13Zm3.5 4.3v4.4L14 12 9.5 9.8ZM4 4h3M4 20h3M17 4h3M17 20h3',
+      book: 'M5 4h12a2 2 0 0 1 2 2v15H7a3 3 0 0 1-3-3V6a2 2 0 0 1 2-2Zm2 0v14m3-9h5m-5 4h4',
+      bell: 'M18 9a6 6 0 0 0-12 0c0 5.2-2.2 7.1-3 8h18c-.8-.9-3-2.8-3-8ZM10 21h4M8 4l-1.5-2M16 4l1.5-2',
+      rules: 'M4 5h10M4 12h8M4 19h7M17 5l2 2 3-4M17 12l2 2 3-4M16 19l2 2 4-6M8 5v14',
+      settings: 'M12 14.8A2.8 2.8 0 1 0 12 9.2a2.8 2.8 0 0 0 0 5.6ZM19.6 13.5v-3l-2.2-.5a6.5 6.5 0 0 0-.8-1.8l1.1-2-2.1-2.1-2 1.1a6.5 6.5 0 0 0-1.8-.8L11.3 2h-3l-.5 2.2a6.5 6.5 0 0 0-1.8.8l-2-1.1-2.1 2.1 1.1 2a6.5 6.5 0 0 0-.8 1.8l-2.2.5v3l2.2.5c.2.7.4 1.3.8 1.8l-1.1 2 2.1 2.1 2-1.1c.6.3 1.2.6 1.8.8l.5 2.2h3l.5-2.2c.7-.2 1.3-.4 1.8-.8l2 1.1 2.1-2.1-1.1-2c.3-.6.6-1.2.8-1.8l2.2-.5Z',
+      help: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-5h.01M9.7 9.2a2.5 2.5 0 1 1 4.5 1.5c-.8.9-2.2 1.2-2.2 3'
     };
     return paths[name] || paths.dashboard;
   }
@@ -281,9 +330,6 @@
         </a>
       {/each}
     </nav>
-    <div class="sidebar-bottom">
-      <button class="about-link" onclick={() => showAbout = true}>关于 DM</button>
-    </div>
   </aside>
 
   <main class="main-content">
@@ -308,14 +354,14 @@
         <button class="alert-bell" onclick={() => { showAlerts = !showAlerts; loadAlerts(); }} title="系统告警">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           {#if alertCount > 0}
-            <span class="alert-badge">{alertCount}</span>
+            <span class="alert-badge">{compactCount(alertCount)}</span>
           {/if}
         </button>
       </div>
     </header>
     <div class="content-area">
       {#if !transitioning}
-        <div in:fade={{ duration: 200, delay: 50 }}>
+        <div class="route-shell" in:fade={{ duration: 200, delay: 50 }}>
           {#if route === 'dashboard'}
             <Dashboard />
           {:else if route === 'checks'}
@@ -336,6 +382,8 @@
             <Knowledge detailId={sid} detailType="doc" />
           {:else if route === 'services'}
             <ServiceManage />
+          {:else if route === 'traffic'}
+            <TrafficAnalysis />
           {:else if route === 'alerts'}
             <Alerts />
           {:else if route === 'rules'}
@@ -360,8 +408,8 @@
         <h2 class="alerts-title">系统告警</h2>
         <div class="alerts-stats">
           {#if alertCount > 0}
-            <span class="alerts-stat stat-error">{alerts.filter(a => a.level === 'error').length} 错误</span>
-            <span class="alerts-stat stat-warn">{alerts.filter(a => a.level === 'warn').length} 警告</span>
+            <span class="alerts-stat stat-error">{compactCount(alerts.filter(a => a.level === 'error').length)} 错误</span>
+            <span class="alerts-stat stat-warn">{compactCount(alerts.filter(a => a.level === 'warn').length)} 警告</span>
           {:else}
             <span class="alerts-stat stat-ok">无告警</span>
           {/if}
@@ -402,26 +450,6 @@
       <div class="alerts-footer">
         <button class="alerts-refresh" onclick={loadAlerts}>刷新</button>
         <a href="#/alerts" class="alerts-view-all" onclick={() => showAlerts = false}>查看全部</a>
-      </div>
-    </div>
-  </div>
-{/if}
-
-{#if showAbout}
-  <div class="about-overlay" onclick={() => showAbout = false} role="presentation">
-    <div class="about-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
-      <div class="about-head">
-        <div>
-          <div class="about-mark">DM</div>
-          <h2>关于 DM</h2>
-        </div>
-        <button class="about-close" onclick={() => showAbout = false}>✕</button>
-      </div>
-      <div class="about-grid">
-        <div><span>版本</span><strong>v0.1.0</strong></div>
-        <div><span>作者</span><strong>xuning</strong></div>
-        <div><span>邮箱</span><strong>gokeeps@qq.com</strong></div>
-        <div><span>版权</span><strong>MIT</strong></div>
       </div>
     </div>
   </div>
@@ -534,13 +562,15 @@
     width: 42px;
     height: 42px;
     border-radius: 8px;
-    background: #0f766e;
+    background:
+      linear-gradient(135deg, rgba(34, 211, 238, 0.92), rgba(20, 184, 166, 0.8) 52%, rgba(99, 102, 241, 0.78));
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: 800;
     font-size: 15px;
     color: #fff;
+    box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.22), 0 0 28px rgba(34, 211, 238, 0.22);
   }
 
   .brand-name {
@@ -574,28 +604,48 @@
     font-weight: 500;
     color: #a7b0c0;
     text-decoration: none;
-    transition: background 0.16s ease, color 0.16s ease;
+    border: 1px solid transparent;
+    transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
     position: relative;
     overflow: hidden;
   }
 
   .nav-item:hover {
-    background: #1d2430;
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.09), rgba(99, 102, 241, 0.08));
     color: #f1f5f9;
+    border-color: rgba(34, 211, 238, 0.16);
+    transform: translateX(2px);
+    box-shadow: inset 0 0 20px rgba(34, 211, 238, 0.04);
   }
 
   .nav-item.active {
-    background: #0f766e;
+    background: linear-gradient(135deg, rgba(20, 184, 166, 0.92), rgba(14, 116, 144, 0.94));
     color: #ffffff;
+    border-color: rgba(125, 211, 252, 0.26);
+    box-shadow: 0 10px 24px rgba(13, 148, 136, 0.18), inset 0 0 20px rgba(255, 255, 255, 0.05);
   }
 
   .nav-icon {
-    width: 20px;
-    height: 20px;
+    width: 28px;
+    height: 28px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    position: relative;
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.56);
+    box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.1);
+  }
+
+  .nav-icon::before {
+    content: '';
+    position: absolute;
+    inset: 4px;
+    border-radius: inherit;
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.22), transparent 68%);
+    opacity: 0;
+    transition: opacity 0.16s ease;
   }
 
   .nav-icon svg {
@@ -606,6 +656,19 @@
     stroke-width: 1.8;
     stroke-linecap: round;
     stroke-linejoin: round;
+    position: relative;
+    z-index: 1;
+    filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.12));
+  }
+
+  .nav-item:hover .nav-icon::before,
+  .nav-item.active .nav-icon::before {
+    opacity: 1;
+  }
+
+  .nav-item.active .nav-icon {
+    background: rgba(2, 6, 23, 0.34);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 0 20px rgba(45, 212, 191, 0.18);
   }
 
   .nav-indicator {
@@ -617,29 +680,6 @@
     height: 20px;
     background: #5eead4;
     border-radius: 0 3px 3px 0;
-  }
-
-  .sidebar-bottom {
-    border-top: 1px solid #252b36;
-    padding: 10px 12px 14px;
-  }
-
-  .about-link {
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid rgba(94, 234, 212, 0.18);
-    border-radius: 8px;
-    background: rgba(15, 118, 110, 0.08);
-    color: #99f6e4;
-    font-size: 12px;
-    font-weight: 700;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .about-link:hover {
-    background: rgba(15, 118, 110, 0.18);
-    border-color: rgba(94, 234, 212, 0.38);
   }
 
   @keyframes pulse {
@@ -769,103 +809,16 @@
   .content-area {
     flex: 1;
     overflow: auto;
-    padding: clamp(14px, 1.6vw, 28px);
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: clamp(14px, 1.2vw, 26px);
     background: var(--bg-primary);
   }
 
-  .about-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 130;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 18px;
-    background: rgba(2, 6, 23, 0.66);
-    backdrop-filter: blur(10px);
-  }
-
-  .about-modal {
-    width: min(420px, 100%);
-    overflow: hidden;
-    border-radius: 14px;
-    border: 1px solid rgba(94, 234, 212, 0.22);
-    background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(8, 13, 24, 0.98));
-    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.46);
-  }
-
-  .about-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 16px;
-    padding: 18px 18px 14px;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
-  }
-
-  .about-mark {
-    display: inline-grid;
-    place-items: center;
-    width: 38px;
-    height: 38px;
-    margin-bottom: 10px;
-    border-radius: 9px;
-    background: #0f766e;
-    color: #fff;
-    font-size: 13px;
-    font-weight: 900;
-    box-shadow: 0 0 30px rgba(45, 212, 191, 0.16);
-  }
-
-  .about-head h2 {
-    margin: 0;
-    color: #f8fafc;
-    font-size: 18px;
-    letter-spacing: 0;
-  }
-
-  .about-close {
-    border: none;
-    border-radius: 8px;
-    background: rgba(148, 163, 184, 0.08);
-    color: #94a3b8;
-    cursor: pointer;
-    padding: 7px 10px;
-  }
-
-  .about-close:hover {
-    color: #f8fafc;
-    background: rgba(148, 163, 184, 0.16);
-  }
-
-  .about-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-    padding: 16px 18px 18px;
-  }
-
-  .about-grid div {
+  .route-shell {
+    width: 100%;
     min-width: 0;
-    padding: 12px;
-    border-radius: 10px;
-    border: 1px solid rgba(148, 163, 184, 0.14);
-    background: rgba(15, 23, 42, 0.64);
-  }
-
-  .about-grid span {
-    display: block;
-    margin-bottom: 5px;
-    color: #94a3b8;
-    font-size: 12px;
-  }
-
-  .about-grid strong {
-    display: block;
-    color: #e2e8f0;
-    font-family: var(--theme-font-family-mono);
-    font-size: 13px;
-    overflow-wrap: anywhere;
   }
 
   @media (max-width: 820px) {

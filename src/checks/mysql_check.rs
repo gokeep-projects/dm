@@ -39,6 +39,9 @@ pub fn check() -> CheckResult {
         .as_deref()
         .map(|v| v.to_lowercase().contains("version"))
         .unwrap_or(false);
+    let running = !process_rows(&["mysqld", "mariadbd"]).is_empty();
+    let installed = find_command("mysql").is_some() || find_command("mysqld").is_some();
+    let available = connected || running || installed;
 
     let sections = vec![
         Section {
@@ -71,9 +74,21 @@ pub fn check() -> CheckResult {
                     },
                     Some(if connected { "ok" } else { "warn" }),
                 ),
-                label("配置路径", path_text(config_path.as_ref()), None),
-                label("数据路径", path_text(data_path.as_ref()), None),
-                label("日志路径", path_text(log_path.as_ref()), None),
+                label(
+                    "配置路径",
+                    path_text_if_available(config_path.as_ref(), available),
+                    None,
+                ),
+                label(
+                    "数据路径",
+                    path_text_if_available(data_path.as_ref(), available),
+                    None,
+                ),
+                label(
+                    "日志路径",
+                    path_text_if_available(log_path.as_ref(), available),
+                    None,
+                ),
             ],
         },
         text_section("版本探测", ping.as_deref(), "未获取到版本"),
@@ -112,8 +127,16 @@ pub fn check() -> CheckResult {
             backup.as_deref(),
             "未获取到 binlog/备份恢复相关变量",
         ),
-        config_preview_section("配置文件", config_path),
-        log_section("关键异常日志", log_path, 100),
+        if available {
+            config_preview_section("配置文件", config_path)
+        } else {
+            unavailable_config_section("配置文件", "MySQL/MariaDB")
+        },
+        if available {
+            log_section("关键异常日志", log_path, 100)
+        } else {
+            unavailable_log_section("关键异常日志", "MySQL/MariaDB")
+        },
         table_section(
             "进程信息",
             vec!["PID", "PPID", "用户", "状态", "CPU", "内存", "命令"],
@@ -135,7 +158,7 @@ pub fn check() -> CheckResult {
         version: "1.0.0".to_string(),
         timestamp: String::new(),
         duration_ms: 0,
-        status: status_from_bool(connected || !process_rows(&["mysqld", "mariadbd"]).is_empty()),
+        status: status_from_bool(connected || running),
         sections,
     }
 }
@@ -160,6 +183,13 @@ fn configured_or_first(value: &str, defaults: &[&str]) -> Option<PathBuf> {
 fn path_text(path: Option<&PathBuf>) -> String {
     path.map(|p| p.display().to_string())
         .unwrap_or_else(|| "未推断到".to_string())
+}
+fn path_text_if_available(path: Option<&PathBuf>, available: bool) -> String {
+    if available {
+        path_text(path)
+    } else {
+        "未检测到程序，跳过路径推断".to_string()
+    }
 }
 fn text_section(title: &str, text: Option<&str>, empty: &str) -> Section {
     let rows = text

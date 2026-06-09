@@ -1,0 +1,68 @@
+name: Build Packages
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  USE_OFFLINE_DEPS: "0"
+  PACKAGE_TARGETS: "x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+  BUILD_WITH_ZIG: "1"
+
+jobs:
+  build:
+    name: Build x86_64 and ARM64 packages
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip musl-tools
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        working-directory: /tmp
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Validate source
+        run: |
+          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' fmt --check
+          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' test --locked
+
+      - name: Build packages
+        run: ./package.sh
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dm-linux-musl-packages
+          path: target/packages/*.zip
+          if-no-files-found: error

@@ -1,14 +1,76 @@
 #!/bin/bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+OFFLINE_DIR="$ROOT/offline"
+USE_OFFLINE_DEPS="${USE_OFFLINE_DEPS:-auto}"
+
 echo "=== DM Linux musl 静态构建打包脚本 ==="
 echo ""
 
 rm -rf target/packages
 mkdir -p target/packages
 
+require_offline_deps() {
+  if [ "$USE_OFFLINE_DEPS" = "auto" ]; then
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+      USE_OFFLINE_DEPS=0
+      echo "[INFO] GitHub Actions 环境，自动联网下载依赖"
+    elif [ -d "$OFFLINE_DIR/npm-cache" ] && [ -d "$OFFLINE_DIR/cargo/vendor" ]; then
+      USE_OFFLINE_DEPS=1
+      echo "[INFO] 检测到项目内 offline 依赖，优先使用本地离线依赖"
+    else
+      USE_OFFLINE_DEPS=0
+      echo "[WARN] 未检测到完整 offline 依赖，改用联网下载依赖"
+    fi
+  fi
+
+  if [ "$USE_OFFLINE_DEPS" != "1" ]; then
+    echo "[INFO] USE_OFFLINE_DEPS=0，npm/Cargo 将联网下载依赖"
+    return
+  fi
+  if [ ! -d "$OFFLINE_DIR/npm-cache" ]; then
+    echo "[FAIL] 缺少 npm 离线缓存: $OFFLINE_DIR/npm-cache"
+    echo "       请先执行: ./scripts/prepare-offline-deps.sh"
+    exit 1
+  fi
+  if [ ! -d "$OFFLINE_DIR/cargo/vendor" ]; then
+    echo "[FAIL] 缺少 Cargo vendor 目录: $OFFLINE_DIR/cargo/vendor"
+    echo "       请先执行: ./scripts/prepare-offline-deps.sh"
+    exit 1
+  fi
+}
+
+run_npm() {
+  if [ "$USE_OFFLINE_DEPS" = "1" ]; then
+    (cd "$ROOT/web" && \
+      npm ci --offline --cache "$OFFLINE_DIR/npm-cache" --prefer-offline --no-audit --fund=false && \
+      npm run build)
+  else
+    (cd "$ROOT/web" && npm ci --no-audit --fund=false && npm run build)
+  fi
+}
+
+cargo_base_cmd() {
+  local cargo_toolchain_arg=()
+  if [ "${1:-}" != "" ] && [[ "$1" == +* ]]; then
+    cargo_toolchain_arg=("$1")
+    shift
+  fi
+  if [ "$USE_OFFLINE_DEPS" = "1" ]; then
+    cargo "${cargo_toolchain_arg[@]}" "$@"
+  else
+    cargo "${cargo_toolchain_arg[@]}" \
+      --config 'net.offline=false' \
+      --config 'source.crates-io.replace-with="crates-io"' \
+      "$@"
+  fi
+}
+
+require_offline_deps
+
 echo "[1/5] 构建前端..."
-(cd web && npm run build)
+run_npm
 echo "[OK] 前端构建完成"
 echo ""
 
@@ -79,6 +141,13 @@ build_target() {
   local static_flags="-C target-feature=+crt-static ${RUSTFLAGS:-}"
   local build_std_args=()
   local cargo_toolchain=()
+  local host_offline_env=()
+  local cross_offline_env=()
+
+  if [ "$USE_OFFLINE_DEPS" = "1" ]; then
+    host_offline_env=(CARGO_NET_OFFLINE=true)
+    cross_offline_env=(CARGO_NET_OFFLINE=true)
+  fi
 
   if [ "${BUILD_STD:-0}" = "1" ] || target_needs_build_std "$target"; then
     build_std_args=(-Z build-std=std,panic_abort)
@@ -86,13 +155,23 @@ build_target() {
   fi
 
   if [ "$target" = "x86_64-unknown-linux-musl" ]; then
-    RUSTFLAGS="$static_flags" \
-      CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-musl-gcc}" \
-      cargo "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
+    (
+      export RUSTFLAGS="$static_flags"
+      export CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-musl-gcc}"
+      if [ "$USE_OFFLINE_DEPS" = "1" ]; then
+        export CARGO_NET_OFFLINE=true
+      fi
+      cargo_base_cmd "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
+    )
   elif [ "${BUILD_WITH_ZIG:-0}" = "1" ] && command -v cargo-zigbuild >/dev/null 2>&1; then
-    RUSTFLAGS="$static_flags" \
-      CARGO_TARGET_DIR="$(target_dir_for "$target")" \
-      cargo "${cargo_toolchain[@]}" zigbuild --release --target "$target" "${build_std_args[@]}"
+    (
+      export RUSTFLAGS="$static_flags"
+      export CARGO_TARGET_DIR="$(target_dir_for "$target")"
+      if [ "$USE_OFFLINE_DEPS" = "1" ]; then
+        export CARGO_NET_OFFLINE=true
+      fi
+      cargo_base_cmd "${cargo_toolchain[@]}" zigbuild --release --target "$target" "${build_std_args[@]}"
+    )
   elif command -v cross >/dev/null 2>&1; then
     if command -v docker >/dev/null 2>&1 && ! docker info >/dev/null 2>&1; then
       echo "    Docker daemon 未运行，尝试启动..."
@@ -102,13 +181,19 @@ build_target() {
       echo "    [FAIL] cross 需要 Docker daemon，当前无法连接 /var/run/docker.sock"
       return 1
     fi
-    RUSTFLAGS="$static_flags" \
+    env "${cross_offline_env[@]}" \
+      RUSTFLAGS="$static_flags" \
       CARGO_TARGET_DIR="$(target_dir_for "$target")" \
       cross "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
   else
-    RUSTFLAGS="$static_flags" \
-      CARGO_TARGET_DIR="$(target_dir_for "$target")" \
-      cargo "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
+    (
+      export RUSTFLAGS="$static_flags"
+      export CARGO_TARGET_DIR="$(target_dir_for "$target")"
+      if [ "$USE_OFFLINE_DEPS" = "1" ]; then
+        export CARGO_NET_OFFLINE=true
+      fi
+      cargo_base_cmd "${cargo_toolchain[@]}" build --release --target "$target" "${build_std_args[@]}"
+    )
   fi
 }
 

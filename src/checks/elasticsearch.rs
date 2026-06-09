@@ -25,6 +25,8 @@ pub fn check() -> CheckResult {
         .and_then(|path| read_file_limited(path, 64 * 1024));
     let data_path = infer_data_path(&cfg.data_path, &process_cmds, config_text.as_deref());
     let log_path = infer_log_path(&cfg.log_path, &process_cmds, config_text.as_deref());
+    let installed = find_command("elasticsearch").is_some();
+    let running = !es_processes.is_empty();
     let program_path = if cfg.program_path.trim().is_empty() {
         find_command("elasticsearch").or_else(|| infer_program_path(&process_cmds))
     } else {
@@ -40,6 +42,7 @@ pub fn check() -> CheckResult {
     let snapshots = curl_json(&base, "/_snapshot?pretty", &cfg);
 
     let connected = root.is_some() || health.is_some();
+    let available = connected || running || installed;
     let mut sections = Vec::new();
     sections.push(Section {
         title: "连接信息".to_string(),
@@ -65,18 +68,34 @@ pub fn check() -> CheckResult {
             ),
             label(
                 "程序路径",
-                program_path.unwrap_or_else(|| "未推断到".to_string()),
+                if available {
+                    program_path.unwrap_or_else(|| "未推断到".to_string())
+                } else {
+                    "未检测到程序，跳过路径推断".to_string()
+                },
                 None,
             ),
-            label("配置路径", path_text(config_path.as_ref()), None),
+            label(
+                "配置路径",
+                path_text_if_available(config_path.as_ref(), available),
+                None,
+            ),
             label(
                 "数据路径",
-                cfg.data_path
-                    .clone()
-                    .if_empty(path_text(data_path.as_ref())),
+                if available {
+                    cfg.data_path
+                        .clone()
+                        .if_empty(path_text(data_path.as_ref()))
+                } else {
+                    "未检测到程序，跳过路径推断".to_string()
+                },
                 None,
             ),
-            label("日志路径", path_text(log_path.as_ref()), None),
+            label(
+                "日志路径",
+                path_text_if_available(log_path.as_ref(), available),
+                None,
+            ),
         ],
     });
 
@@ -114,8 +133,16 @@ pub fn check() -> CheckResult {
         &[],
         80,
     ));
-    sections.push(config_preview_section("配置信息", config_path));
-    sections.push(log_section("日常异常日志", log_path, 100));
+    sections.push(if available {
+        config_preview_section("配置信息", config_path)
+    } else {
+        unavailable_config_section("配置信息", "Elasticsearch")
+    });
+    sections.push(if available {
+        log_section("日常异常日志", log_path, 100)
+    } else {
+        unavailable_log_section("日常异常日志", "Elasticsearch")
+    });
     sections.push(table_section(
         "进程与端口",
         vec!["PID", "PPID", "用户", "状态", "CPU", "内存", "命令"],
@@ -411,6 +438,13 @@ fn text_table_section(title: &str, text: Option<&str>, empty: &str) -> Section {
 fn path_text(path: Option<&PathBuf>) -> String {
     path.map(|p| p.display().to_string())
         .unwrap_or_else(|| "未推断到".to_string())
+}
+fn path_text_if_available(path: Option<&PathBuf>, available: bool) -> String {
+    if available {
+        path_text(path)
+    } else {
+        "未检测到程序，跳过路径推断".to_string()
+    }
 }
 
 fn mask_empty(value: &str) -> String {

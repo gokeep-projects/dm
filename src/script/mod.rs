@@ -128,8 +128,27 @@ fn find_by_extension(dir: &Path) -> Option<PathBuf> {
         if !p.is_file() {
             continue;
         }
-        let ext = p.extension().and_then(|e| e.to_str())?;
-        if matches!(ext, "sh" | "py" | "js" | "pl" | "rb" | "lua") {
+        let ext = p.extension().and_then(|e| e.to_str())?.to_ascii_lowercase();
+        if matches!(
+            ext.as_str(),
+            "sh" | "bash"
+                | "zsh"
+                | "ksh"
+                | "py"
+                | "python"
+                | "js"
+                | "mjs"
+                | "pl"
+                | "perl"
+                | "rb"
+                | "lua"
+                | "php"
+                | "awk"
+                | "expect"
+                | "exp"
+                | "run"
+                | "bin"
+        ) {
             return Some(p);
         }
     }

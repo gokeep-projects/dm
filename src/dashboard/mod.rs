@@ -4,6 +4,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+const TOP_PROCESS_LIMIT: usize = 10;
+
 /// 系统信息
 #[derive(Debug, Serialize)]
 pub struct SystemInfo {
@@ -457,6 +459,6 @@ pub fn get_system_info() -> SystemInfo {
         process_count: process_count(),
         networks,
         disks: collect_disks(),
-        top_processes: collect_top_processes(8),
+        top_processes: collect_top_processes(TOP_PROCESS_LIMIT),
     }
 }

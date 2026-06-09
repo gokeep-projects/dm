@@ -2,7 +2,7 @@ use crate::cli::util::{category_color, format_duration_ms, print_heading, status
 use crate::config::{all_script_dirs, Config};
 use crate::db::Database;
 use crate::script;
-use crate::script::executor::resolve_interpreter;
+use crate::script::executor::{resolve_interpreter, system_environment};
 use anyhow::Result;
 use colored::*;
 use std::io::{self, Write};
@@ -43,7 +43,25 @@ pub async fn execute(
     })?;
 
     let start_time = Instant::now();
-    db.insert_exec(&script.id, &script.name, None, None, 0);
+    let param_json = params
+        .iter()
+        .filter_map(|param| param.split_once('='))
+        .map(|(key, value)| {
+            (
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    db.insert_exec_with_inputs(
+        &script.id,
+        &script.name,
+        None,
+        None,
+        0,
+        &serde_json::Value::Object(param_json),
+        args,
+    );
 
     if script.path.starts_with(&config.scripts_dir) {
         if let Some(result) = crate::checks::run_check(script_id) {
@@ -162,8 +180,13 @@ pub async fn execute(
     if json_mode {
         let output = if timeout > 0 {
             let dur = std::time::Duration::from_secs(timeout);
-            match tokio::time::timeout(dur, async { Command::new(&cmd).args(&cmd_args).output() })
-                .await
+            match tokio::time::timeout(dur, async {
+                Command::new(&cmd)
+                    .args(&cmd_args)
+                    .envs(system_environment())
+                    .output()
+            })
+            .await
             {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => return Err(e.into()),
@@ -187,7 +210,10 @@ pub async fn execute(
                 }
             }
         } else {
-            Command::new(&cmd).args(&cmd_args).output()?
+            Command::new(&cmd)
+                .args(&cmd_args)
+                .envs(system_environment())
+                .output()?
         };
         let elapsed = start_time.elapsed();
         let code = output.status.code().unwrap_or(-1);
@@ -214,7 +240,13 @@ pub async fn execute(
 
     let status = if timeout > 0 {
         let dur = std::time::Duration::from_secs(timeout);
-        match tokio::time::timeout(dur, async { Command::new(&cmd).args(&cmd_args).status() }).await
+        match tokio::time::timeout(dur, async {
+            Command::new(&cmd)
+                .args(&cmd_args)
+                .envs(system_environment())
+                .status()
+        })
+        .await
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
@@ -241,7 +273,10 @@ pub async fn execute(
             }
         }
     } else {
-        Command::new(&cmd).args(&cmd_args).status()?
+        Command::new(&cmd)
+            .args(&cmd_args)
+            .envs(system_environment())
+            .status()?
     };
     let elapsed = start_time.elapsed();
 

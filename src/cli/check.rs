@@ -12,6 +12,7 @@ const CORE_CHECK_IDS: &[&str] = &[
     "system",
     "resource",
     "service",
+    "service-manage",
     "network",
     "security",
     "middleware",

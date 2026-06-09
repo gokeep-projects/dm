@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -31,13 +32,54 @@ pub struct LogMessage {
 pub fn resolve_interpreter(script_path: &Path) -> (String, Vec<String>) {
     let script_str = script_path.to_string_lossy().to_string();
     match script_path.extension().and_then(|e| e.to_str()) {
-        Some("sh") => ("bash".to_string(), vec![script_str]),
-        Some("py") => ("python3".to_string(), vec![script_str]),
-        Some("js") => ("node".to_string(), vec![script_str]),
-        Some("pl") => ("perl".to_string(), vec![script_str]),
+        Some("sh") | Some("bash") => ("bash".to_string(), vec![script_str]),
+        Some("zsh") => ("zsh".to_string(), vec![script_str]),
+        Some("ksh") => ("ksh".to_string(), vec![script_str]),
+        Some("py") | Some("python") => ("python3".to_string(), vec![script_str]),
+        Some("js") | Some("mjs") => ("node".to_string(), vec![script_str]),
+        Some("pl") | Some("perl") => ("perl".to_string(), vec![script_str]),
         Some("rb") => ("ruby".to_string(), vec![script_str]),
         Some("lua") => ("lua".to_string(), vec![script_str]),
+        Some("php") => ("php".to_string(), vec![script_str]),
+        Some("awk") => ("awk".to_string(), vec!["-f".to_string(), script_str]),
+        Some("expect") | Some("exp") => ("expect".to_string(), vec![script_str]),
         _ => (script_str, vec![]),
+    }
+}
+
+pub fn system_environment() -> HashMap<String, String> {
+    let mut envs: HashMap<String, String> = std::env::vars().collect();
+    for path in ["/etc/environment", "/etc/default/locale"] {
+        merge_env_file(&mut envs, path);
+    }
+    envs.entry("PATH".to_string()).or_insert_with(|| {
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+    });
+    envs
+}
+
+fn merge_env_file(envs: &mut HashMap<String, String>, path: &str) {
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || envs.contains_key(key) {
+            continue;
+        }
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        envs.insert(key.to_string(), value);
     }
 }
 
@@ -136,6 +178,7 @@ async fn run_script(
 
     let mut child = Command::new(&cmd)
         .args(&cmd_args)
+        .envs(system_environment())
         .envs(envs)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -212,4 +255,35 @@ async fn run_script(
 
     let exit_code = status.code().unwrap_or(-1);
     Ok(RunOutcome::Completed(exit_code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_interpreter, system_environment};
+    use std::path::Path;
+
+    #[test]
+    fn resolves_common_executable_script_types() {
+        let cases = [
+            ("maint.sh", "bash"),
+            ("maint.bash", "bash"),
+            ("maint.py", "python3"),
+            ("maint.python", "python3"),
+            ("maint.pl", "perl"),
+            ("maint.perl", "perl"),
+            ("maint.expect", "expect"),
+            ("maint.awk", "awk"),
+        ];
+        for (file, expected) in cases {
+            let (cmd, args) = resolve_interpreter(Path::new(file));
+            assert_eq!(cmd, expected);
+            assert!(args.iter().any(|arg| arg.contains(file)));
+        }
+    }
+
+    #[test]
+    fn system_environment_always_contains_path() {
+        let envs = system_environment();
+        assert!(envs.get("PATH").is_some_and(|value| !value.is_empty()));
+    }
 }

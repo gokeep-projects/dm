@@ -33,6 +33,11 @@
   let sourceLoading = $state(false);
   let sourceCopyOk = $state(false);
   let sourceCopyTimer = null;
+  let commandCopyOk = $state(false);
+  let commandCopyTimer = null;
+  let copiedHistoryId = $state('');
+  let reusedHistoryId = $state('');
+  let replayingHistoryId = $state('');
   let showHistory = $state(false);
   let historyData = $state([]);
   let historyLoading = $state(false);
@@ -50,6 +55,7 @@
   const MAX_RECONNECT = 5;
   let jsonData = $state(null);
   let showJsonView = $state(false);
+  let lastProfileState = $derived(executionState(statsData?.last_execution || historyData[0]));
 
   function formatDuration(ms) {
     const s = Math.floor(ms / 1000);
@@ -119,9 +125,13 @@
   async function loadHistory() {
     if (showHistory) { showHistory = false; return; }
     showHistory = true;
+    await refreshHistory(20);
+  }
+
+  async function refreshHistory(limit = 20) {
     historyLoading = true;
     try {
-      const r = await fetch('/api/dashboard/history?script_id=' + encodeURIComponent(id) + '&limit=20');
+      const r = await fetch('/api/dashboard/history?script_id=' + encodeURIComponent(id) + '&limit=' + limit);
       if (r.ok) {
         const d = await r.json();
         historyData = d.records || [];
@@ -162,12 +172,20 @@
   async function loadStats() {
     if (showStats) { showStats = false; return; }
     showStats = true;
+    await refreshStats();
+  }
+
+  async function refreshStats() {
     statsLoading = true;
     try {
       const r = await fetch('/api/scripts/' + encodeURIComponent(id) + '/stats');
       if (r.ok) statsData = await r.json();
     } catch (_) {}
     statsLoading = false;
+  }
+
+  async function refreshRunProfile() {
+    await Promise.all([refreshStats(), refreshHistory(5)]);
   }
 
   function copySource() {
@@ -179,11 +197,105 @@
     }).catch(() => {});
   }
 
+  async function copyRunCommand() {
+    const command = buildRunCommand();
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(command);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = command;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+      commandCopyOk = true;
+      clearTimeout(commandCopyTimer);
+      commandCopyTimer = setTimeout(() => commandCopyOk = false, 1600);
+    } catch (_) {}
+  }
+
+  function shellQuote(value) {
+    const text = String(value ?? '');
+    if (/^[A-Za-z0-9_./:=@%+,-]+$/.test(text)) return text;
+    return "'" + text.replace(/'/g, "'\\''") + "'";
+  }
+
+  function normalizedHistoryParams(record) {
+    const raw = record?.params || {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, String(v ?? '')]));
+  }
+
+  function buildRunCommand(record = null) {
+    const params = record ? normalizedHistoryParams(record) : getParamPayload().params;
+    const args = record ? (Array.isArray(record.args) ? record.args : []) : getParamPayload().args;
+    const parts = ['dm', 'run', shellQuote(id)];
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value !== '') parts.push('--param', shellQuote(`${key}=${value}`));
+    }
+    if (args?.length) {
+      parts.push('--');
+      parts.push(...args.map(shellQuote));
+    }
+    return parts.join(' ');
+  }
+
+  async function copyHistoryCommand(record) {
+    const command = buildRunCommand(record);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(command);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = command;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+      copiedHistoryId = String(record.id);
+      setTimeout(() => {
+        if (copiedHistoryId === String(record.id)) copiedHistoryId = '';
+      }, 1400);
+    } catch (_) {}
+  }
+
   function formatBytes(n) {
     if (!n) return '0 B';
     if (n < 1024) return n + ' B';
     if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
     return (n / 1048576).toFixed(2) + ' MB';
+  }
+
+  function formatDurationCompact(ms) {
+    if (ms === null || ms === undefined) return '-';
+    const n = Number(ms || 0);
+    if (n < 1000) return Math.round(n) + 'ms';
+    if (n < 60000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 's';
+    const m = Math.floor(n / 60000);
+    const s = Math.round((n % 60000) / 1000);
+    return `${m}m${s}s`;
+  }
+
+  function successRateText() {
+    const total = statsData?.total_executions || 0;
+    if (!total) return '-';
+    return Math.round((statsData.success_count || 0) / total * 100) + '%';
+  }
+
+  function executionState(record) {
+    if (!record) return { text: '未执行', tone: 'idle' };
+    if (record.exit_code === 0) return { text: '成功', tone: 'ok' };
+    if (record.exit_code === null || record.exit_code === undefined) return { text: '运行中', tone: 'running' };
+    return { text: `失败 ${record.exit_code}`, tone: 'fail' };
   }
 
   function formatTime(ts) {
@@ -304,6 +416,22 @@
     initParamValues();
   }
 
+  function reuseHistoryParams(record) {
+    const params = normalizedHistoryParams(record);
+    if (!Object.keys(params).length) return;
+    const defined = new Set((info?.metadata?.params || []).map(p => p.name));
+    const next = { ...paramValues };
+    for (const [key, value] of Object.entries(params)) {
+      if (!defined.size || defined.has(key)) next[key] = value;
+    }
+    paramValues = next;
+    showParams = true;
+    reusedHistoryId = String(record.id);
+    setTimeout(() => {
+      if (reusedHistoryId === String(record.id)) reusedHistoryId = '';
+    }, 1400);
+  }
+
   function getParamPayload() {
     const params = info?.metadata?.params || [];
     if (params.length === 0) return { params: {}, args: [] };
@@ -315,6 +443,13 @@
       }
     }
     return { params: filtered, args: [] };
+  }
+
+  function historyRunPayload(record) {
+    return {
+      params: normalizedHistoryParams(record),
+      args: Array.isArray(record?.args) ? record.args : [],
+    };
   }
 
   function initTerminal() {
@@ -443,7 +578,9 @@
     }, 100);
   }
 
-  function runScript() {
+  function runScript(record = null) {
+    const replayId = record?.id !== undefined ? String(record.id) : '';
+    if (replayId) replayingHistoryId = replayId;
     if (terminal) {
       terminal.clear();
       terminal.reset();
@@ -457,16 +594,21 @@
     durationMs = 0;
     running = true;
     writePrompt();
+    if (record && terminal) {
+      terminal.writeln(`\x1b[1;36m[REPLAY] 按历史记录 ${formatTime(record.timestamp)} 复现执行\x1b[0m`);
+      terminal.writeln(`\x1b[2m${buildRunCommand(record)}\x1b[0m`);
+      terminal.writeln('');
+    }
     startTimer();
-    connectWs();
+    connectWs(record ? historyRunPayload(record) : null);
   }
 
-  function connectWs() {
+  function connectWs(payload = null) {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/ws/exec/${id}`);
     ws.onopen = () => {
       reconnectAttempts = 0;
-      ws.send(JSON.stringify({ action: 'run', ...getParamPayload() }));
+      ws.send(JSON.stringify({ action: 'run', ...(payload || getParamPayload()) }));
     };
     ws.onmessage = (e) => {
       try {
@@ -498,6 +640,8 @@
             };
             showJsonView = true;
           }
+          refreshRunProfile();
+          replayingHistoryId = '';
           reconnectAttempts = 0;
           try { ws?.close(); } catch (_) {}
           return;
@@ -517,6 +661,8 @@
               terminal.writeln(`\x1b[1;31m[FAIL] 执行失败 (退出码: ${exitCode}, ${lineCount} 行)${dur}\x1b[0m`);
             }
           }
+          refreshRunProfile();
+          replayingHistoryId = '';
           return;
         }
         if (d.line) {
@@ -533,6 +679,7 @@
       if (exitCode !== null) return;
       if (reconnectAttempts >= MAX_RECONNECT) {
         running = false;
+        replayingHistoryId = '';
         stopTimer();
         if (terminal) terminal.writeln('\x1b[1;31m[FAIL] 连接已断开，重连失败（已达最大重试次数）\x1b[0m');
         return;
@@ -541,7 +688,7 @@
       reconnectAttempts++;
       const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
       if (terminal) terminal.writeln(`\x1b[1;33m[WARN] 连接已断开，${Math.round(delay/1000)}秒后重连 (${reconnectAttempts}/${MAX_RECONNECT})...\x1b[0m`);
-      setTimeout(() => { if (running) connectWs(); }, delay);
+      setTimeout(() => { if (running) connectWs(payload); }, delay);
     };
   }
 
@@ -549,6 +696,7 @@
     if (ws) {
       ws.close();
       running = false;
+      replayingHistoryId = '';
       stopTimer();
       if (terminal) {
         terminal.writeln('');
@@ -610,6 +758,23 @@
     return '';
   }
 
+  function resultExitCode() {
+    if (jsonData?.exit_code !== undefined && jsonData?.exit_code !== null) return jsonData.exit_code;
+    return exitCode;
+  }
+
+  function resultExitText() {
+    const code = resultExitCode();
+    if (code === null || code === undefined) return '退出码 -';
+    return `退出码 ${code}`;
+  }
+
+  function resultElapsedMs() {
+    if (typeof jsonData?.elapsed_ms === 'number') return jsonData.elapsed_ms;
+    if (typeof durationMs === 'number' && durationMs > 0) return durationMs;
+    return null;
+  }
+
   function statusColor(s) {
     if (s === 'ok') return '#34d399';
     if (s === 'warn') return '#fbbf24';
@@ -650,6 +815,7 @@
     if (id && termContainer) {
       initTerminal();
       loadInfo();
+      refreshRunProfile();
     }
   });
 
@@ -675,6 +841,7 @@
     stopTimer();
     if (copyTimer) clearTimeout(copyTimer);
     if (downloadTimer) clearTimeout(downloadTimer);
+    if (commandCopyTimer) clearTimeout(commandCopyTimer);
     if (ws) ws.close();
     if (terminal) {
       try { terminal.dispose(); } catch (_) {}
@@ -726,6 +893,29 @@
         </svg>
         <span>复制</span>
       </button>
+      <button class="action-btn command-btn" onclick={copyRunCommand} title="复制运行命令" aria-label="复制运行命令">
+        {#if commandCopyOk}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m5 12 5 5L20 7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>已复制</span>
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 17l6-6-6-6" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M12 19h8" stroke-linecap="round"/>
+          </svg>
+          <span>命令</span>
+        {/if}
+      </button>
+      <button class="action-btn refresh-btn" onclick={refreshRunProfile} title="刷新运行画像" aria-label="刷新运行画像">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12a9 9 0 0 1-15.4 6.4L3 16" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M3 21v-5h5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M3 12a9 9 0 0 1 15.4-6.4L21 8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M21 3v5h-5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>刷新</span>
+      </button>
       <button class="action-btn stats-btn" onclick={loadStats} title="查看执行统计" aria-label="查看执行统计">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 20V10" stroke-linecap="round" stroke-linejoin="round"/>
@@ -773,6 +963,35 @@
     </div>
   {/if}
 
+  <div class="run-profile">
+    <div class="profile-card">
+      <span class="profile-label">执行次数</span>
+      <strong>{statsLoading && !statsData ? '...' : statsData?.total_executions ?? 0}</strong>
+    </div>
+    <div class="profile-card">
+      <span class="profile-label">成功率</span>
+      <strong class:profile-ok={successRateText() === '100%'}>{statsLoading && !statsData ? '...' : successRateText()}</strong>
+    </div>
+    <div class="profile-card">
+      <span class="profile-label">最近结果</span>
+      <strong class="profile-state {lastProfileState.tone}">{lastProfileState.text}</strong>
+    </div>
+    <div class="profile-card">
+      <span class="profile-label">平均耗时</span>
+      <strong>{statsLoading && !statsData ? '...' : formatDurationCompact(statsData?.avg_duration_ms)}</strong>
+    </div>
+    <button class="profile-card profile-wide profile-action" onclick={loadHistory} title="打开执行历史">
+      <span class="profile-label">最近记录</span>
+      {#if historyLoading && historyData.length === 0}
+        <strong>加载中...</strong>
+      {:else if historyData[0]}
+        <strong>{formatTime(historyData[0].timestamp)} · {formatDurationCompact(historyData[0].duration_ms)} · {historyData[0].output_lines || 0} 行</strong>
+      {:else}
+        <strong>暂无执行记录</strong>
+      {/if}
+    </button>
+  </div>
+
   {#if showParams && info?.metadata?.params?.length}
     <div class="params-form">
       <div class="params-header">
@@ -813,6 +1032,11 @@
           </div>
         {/each}
       </div>
+      <div class="param-command-preview">
+        <span>当前命令</span>
+        <code>{buildRunCommand()}</code>
+        <button type="button" onclick={copyRunCommand}>{commandCopyOk ? '已复制' : '复制'}</button>
+      </div>
     </div>
   {/if}
 
@@ -840,17 +1064,35 @@
             <div class="history-panel-item">
               <div class="history-panel-item-head">
                 <span class="history-panel-time" title={r.timestamp}>{formatTime(r.timestamp)}</span>
-                <span class="history-panel-result" style="color:{r.exit_code === 0 ? '#34d399' : r.exit_code === null ? '#fbbf24' : '#f87171'}">
-                  {r.exit_code === 0 ? '[OK] 成功' : r.exit_code === null ? '[RUN] 运行中' : '[FAIL] 失败 (' + r.exit_code + ')'}
-                </span>
+                <div class="history-panel-right">
+                  <span class="history-panel-result" style="color:{r.exit_code === 0 ? '#34d399' : r.exit_code === null ? '#fbbf24' : '#f87171'}">
+                    {r.exit_code === 0 ? '[OK] 成功' : r.exit_code === null ? '[RUN] 运行中' : '[FAIL] 失败 (' + r.exit_code + ')'}
+                  </span>
+                  <button class="history-mini-btn" onclick={() => copyHistoryCommand(r)} title="复制可复现运行命令">
+                    {copiedHistoryId === String(r.id) ? '已复制' : '复制命令'}
+                  </button>
+                  <button class="history-mini-btn replay" onclick={() => runScript(r)} disabled={running} title="按这条历史记录的参数再次执行">
+                    {replayingHistoryId === String(r.id) ? '执行中' : '按此执行'}
+                  </button>
+                  {#if Object.keys(normalizedHistoryParams(r)).length > 0}
+                    <button class="history-mini-btn reuse" onclick={() => reuseHistoryParams(r)} title="把本次历史参数填回参数表单">
+                      {reusedHistoryId === String(r.id) ? '已复用' : '复用参数'}
+                    </button>
+                  {/if}
+                </div>
               </div>
               <div class="history-panel-item-meta">
                 {#if r.duration_ms}
                   <span class="history-panel-dur">耗时 {r.duration_ms >= 1000 ? (r.duration_ms/1000).toFixed(1) + 's' : r.duration_ms + 'ms'}</span>
                 {/if}
-                {#if Object.keys(r.params || {}).length > 0}
-                  {#each Object.entries(r.params) as [k, v]}
+                {#if Object.keys(normalizedHistoryParams(r)).length > 0}
+                  {#each Object.entries(normalizedHistoryParams(r)) as [k, v]}
                     <span class="history-panel-param">{k}={v}</span>
+                  {/each}
+                {/if}
+                {#if r.args?.length}
+                  {#each r.args as arg}
+                    <span class="history-panel-param arg">arg:{arg}</span>
                   {/each}
                 {/if}
               </div>
@@ -1000,11 +1242,12 @@
           <span class="result-badge" style="color:{statusColor(resultStatus())};background:{statusColor(resultStatus())}15">
             {resultStatusText()}
           </span>
+          <span class="result-chip">{resultExitText()}</span>
           {#if resultMetaText()}
-            <span class="result-duration">{resultMetaText()}</span>
+            <span class="result-chip">{resultMetaText()}</span>
           {/if}
-          {#if durationMs > 0}
-            <span class="result-duration">耗时 {formatDuration(durationMs)}</span>
+          {#if resultElapsedMs() !== null}
+            <span class="result-chip">耗时 {formatDurationCompact(resultElapsedMs())}</span>
           {/if}
         </div>
 
@@ -1346,6 +1589,77 @@
     margin-bottom: 16px;
   }
 
+  .run-profile {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(120px, 1fr)) minmax(220px, 1.35fr);
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .profile-card {
+    min-width: 0;
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.025), transparent 65%),
+      var(--bg-card);
+  }
+
+  .profile-action {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color .16s ease, background .16s ease, transform .16s ease;
+  }
+
+  .profile-action:hover,
+  .profile-action:focus-visible {
+    border-color: var(--border-focus);
+    background:
+      linear-gradient(180deg, rgba(34,211,238,.065), transparent 72%),
+      var(--bg-card);
+    transform: translateY(-1px);
+    outline: none;
+  }
+
+  .profile-label {
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .06em;
+  }
+
+  .profile-card strong {
+    min-width: 0;
+    color: var(--text-primary);
+    font-family: var(--theme-font-family-mono);
+    font-size: 15px;
+    font-weight: 900;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .profile-card .profile-ok,
+  .profile-state.ok {
+    color: #34d399;
+  }
+
+  .profile-state.fail {
+    color: #fb7185;
+  }
+
+  .profile-state.running {
+    color: #fbbf24;
+  }
+
+  .profile-state.idle {
+    color: var(--text-secondary);
+  }
+
   .info-item {
     display: flex;
     align-items: center;
@@ -1405,6 +1719,48 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 10px;
+  }
+  .param-command-preview {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid rgba(34, 211, 238, 0.14);
+    border-radius: 9px;
+    background: rgba(34, 211, 238, 0.045);
+  }
+  .param-command-preview span {
+    color: #67e8f9;
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: .06em;
+    white-space: nowrap;
+  }
+  .param-command-preview code {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #dbeafe;
+    font-family: var(--theme-font-family-mono);
+    font-size: 11px;
+  }
+  .param-command-preview button {
+    min-height: 24px;
+    padding: 0 8px;
+    border: 1px solid rgba(34, 211, 238, 0.2);
+    border-radius: 7px;
+    background: rgba(34, 211, 238, 0.08);
+    color: #67e8f9;
+    font-size: 10px;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  .param-command-preview button:hover {
+    border-color: rgba(34, 211, 238, 0.36);
+    background: rgba(34, 211, 238, 0.14);
   }
   .param-row {
     display: flex;
@@ -1519,6 +1875,34 @@
     box-shadow: none;
   }
 
+  .command-btn {
+    background: rgba(34, 211, 238, 0.06);
+    color: #67e8f9;
+    border: 1px solid rgba(34, 211, 238, 0.14);
+  }
+
+  .command-btn:hover:not(:disabled) {
+    background: rgba(34, 211, 238, 0.11);
+    color: #22d3ee;
+    border-color: rgba(34, 211, 238, 0.28);
+    transform: none;
+    box-shadow: none;
+  }
+
+  .refresh-btn {
+    background: rgba(96, 165, 250, 0.06);
+    color: #93c5fd;
+    border: 1px solid rgba(96, 165, 250, 0.14);
+  }
+
+  .refresh-btn:hover:not(:disabled) {
+    background: rgba(96, 165, 250, 0.11);
+    color: #bfdbfe;
+    border-color: rgba(96, 165, 250, 0.28);
+    transform: none;
+    box-shadow: none;
+  }
+
   .stats-btn {
     background: rgba(255, 255, 255, 0.05);
     color: #94a3b8;
@@ -1573,10 +1957,19 @@
   .history-panel-item:last-child { border-bottom: none; }
   .history-panel-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .history-panel-time { font-family: var(--theme-font-family-mono); font-size: 11px; color: var(--text-secondary); }
+  .history-panel-right { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
   .history-panel-result { font-size: 11px; font-weight: 600; }
-  .history-panel-item-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+  .history-mini-btn { min-height: 22px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--border-primary); background: var(--bg-card); color: var(--text-secondary); font-size: 10px; font-weight: 800; cursor: pointer; white-space: nowrap; }
+  .history-mini-btn:hover { border-color: var(--border-focus); background: var(--accent-primary-light); color: var(--accent-primary); }
+  .history-mini-btn:disabled { opacity: .48; cursor: not-allowed; }
+  .history-mini-btn.replay { border-color: rgba(34,211,238,.2); color: #67e8f9; }
+  .history-mini-btn.replay:hover:not(:disabled) { background: rgba(34,211,238,.1); border-color: rgba(34,211,238,.36); }
+  .history-mini-btn.reuse { border-color: rgba(52,211,153,.2); color: #86efac; }
+  .history-mini-btn.reuse:hover { background: rgba(52,211,153,.1); border-color: rgba(52,211,153,.36); }
+  .history-panel-item-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .history-panel-dur { font-family: var(--theme-font-family-mono); font-size: 10px; color: var(--text-secondary); }
   .history-panel-param { font-family: var(--theme-font-family-mono); font-size: 9px; color: var(--text-secondary); background: var(--bg-secondary); padding: 1px 5px; border-radius: 3px; }
+  .history-panel-param.arg { color: #93c5fd; background: rgba(59,130,246,.1); }
   .history-panel-footer { padding: 6px 14px; border-top: 1px solid var(--border-primary); font-size: 10px; color: var(--text-tertiary); }
 
   .stats-panel {
@@ -1991,6 +2384,8 @@
     .header-actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; gap: 6px; }
     .action-btn { padding: 6px 10px; font-size: 11px; }
     .info-strip { flex-wrap: wrap; gap: 10px; }
+    .run-profile { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .profile-wide { grid-column: 1 / -1; }
     .params-grid { grid-template-columns: 1fr; }
     .terminal-body { min-height: 300px; height: 50vh; }
     .terminal-bar { flex-wrap: wrap; gap: 6px; }
@@ -2033,6 +2428,7 @@
     border: 1px solid;
   }
 
+  .result-chip,
   .result-duration {
     font-size: 11px;
     color: var(--text-secondary);
@@ -2040,6 +2436,8 @@
     padding: 3px 8px;
     border-radius: 6px;
     background: var(--bg-secondary);
+    border: 1px solid var(--border-secondary);
+    white-space: nowrap;
   }
 
   .result-sections {
@@ -2439,6 +2837,7 @@
 
   .detail-header,
   .info-strip,
+  .run-profile .profile-card,
   .params-form,
   .terminal,
   .source-modal,

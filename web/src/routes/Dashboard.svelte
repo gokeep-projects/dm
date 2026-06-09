@@ -22,6 +22,8 @@
   let allProcesses = $state([]);
   let processSortKey = $state('cpu_usage');
   let processSortDir = $state('desc');
+  let topProcessSortKey = $state('cpu_usage');
+  let topProcessSortDir = $state('desc');
   let historySortKey = $state('timestamp');
   let historySortDir = $state('desc');
   let dashboardWs = null;
@@ -38,6 +40,7 @@
   let trendRangeEnd = $state(Date.now());
 
   const SAMPLE_MIN_MS = 14 * 1000;
+  const TOP_PROCESS_DISPLAY_LIMIT = 10;
   const trendOptions = [
     { value: 3, label: '3分钟' },
     { value: 30, label: '30分钟' },
@@ -338,6 +341,14 @@
     }
   }
 
+  function changeTopProcessSort(key) {
+    if (topProcessSortKey === key) topProcessSortDir = topProcessSortDir === 'asc' ? 'desc' : 'asc';
+    else {
+      topProcessSortKey = key;
+      topProcessSortDir = key === 'cpu_usage' || key === 'memory_bytes' ? 'desc' : 'asc';
+    }
+  }
+
   function changeHistorySort(key) {
     if (historySortKey === key) historySortDir = historySortDir === 'asc' ? 'desc' : 'asc';
     else {
@@ -433,6 +444,18 @@
       if (processSortDir === 'desc') cmp = -cmp;
       return cmp;
     });
+  });
+
+  let sortedTopProcesses = $derived.by(() => {
+    return [...(sys?.top_processes || [])].sort((a, b) => {
+      const av = processValue(a, topProcessSortKey);
+      const bv = processValue(b, topProcessSortKey);
+      let cmp = typeof av === 'number' && typeof bv === 'number'
+        ? av - bv
+        : String(av).localeCompare(String(bv), 'zh-CN');
+      if (topProcessSortDir === 'desc') cmp = -cmp;
+      return cmp;
+    }).slice(0, TOP_PROCESS_DISPLAY_LIMIT);
   });
 
   let sortedHistory = $derived.by(() => {
@@ -668,18 +691,20 @@
           <div class="proc-table">
             <div class="proc-header">
               <span class="proc-col-rank">#</span>
-              <span class="proc-col-name">进程名</span>
-              <span class="proc-col-cpu">CPU</span>
-              <span class="proc-col-mem">内存</span>
+              <button class="proc-sort proc-col-name" onclick={() => changeTopProcessSort('name')}>进程名{sortMark(topProcessSortKey, topProcessSortDir, 'name')}</button>
+              <button class="proc-sort proc-col-cpu" onclick={() => changeTopProcessSort('cpu_usage')}>CPU{sortMark(topProcessSortKey, topProcessSortDir, 'cpu_usage')}</button>
+              <button class="proc-sort proc-col-mem" onclick={() => changeTopProcessSort('memory_bytes')}>内存{sortMark(topProcessSortKey, topProcessSortDir, 'memory_bytes')}</button>
             </div>
-            {#each sys.top_processes.slice(0, 6) as p, i}
-              <div class="proc-row" class:proc-warning={p.cpu_usage > 50} class:proc-critical={p.cpu_usage > 80}>
-                <span class="proc-col-rank">{i + 1}</span>
-                <span class="proc-col-name">{p.name}</span>
-                <span class="proc-col-cpu" style="color:{barColor(p.cpu_usage)}">{p.cpu_usage.toFixed(1)}%</span>
-                <span class="proc-col-mem">{fmt(p.memory_bytes)}</span>
-              </div>
-            {/each}
+            <div class="proc-list">
+              {#each sortedTopProcesses as p, i}
+                <div class="proc-row" class:proc-warning={p.cpu_usage > 50} class:proc-critical={p.cpu_usage > 80}>
+                  <span class="proc-col-rank">{i + 1}</span>
+                  <span class="proc-col-name">{p.name}</span>
+                  <span class="proc-col-cpu" style="color:{barColor(p.cpu_usage)}">{p.cpu_usage.toFixed(1)}%</span>
+                  <span class="proc-col-mem">{fmt(p.memory_bytes)}</span>
+                </div>
+              {/each}
+            </div>
           </div>
           <button class="proc-more-btn" onclick={showAllProcessesPanel}>查看所有进程 →</button>
         </div>
@@ -844,10 +869,23 @@
   .info-row span:first-child { color: var(--text-tertiary); }
   .info-row span:last-child { color: var(--text-primary); font-family: var(--theme-font-family-mono); }
   .ip-value { color: #3b82f6 !important; font-weight: 600; }
-  .proc-section { min-height: 264px; display: flex; flex-direction: column; }
-  .proc-table { flex: 1; }
+  .proc-section { height: 392px; min-height: 392px; display: flex; flex-direction: column; }
+  .proc-table { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
   .proc-more-btn { width: 100%; padding: 8px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-secondary); font-size: 11px; cursor: pointer; margin-top: 8px; }
   .proc-more-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+  @media (min-width: 1440px) {
+    .main-grid { grid-template-columns: minmax(0, 1fr) minmax(380px, 440px); align-items: stretch; }
+    .left-col, .right-col { min-height: calc(100vh - 246px); }
+    .trend-card { flex: 1; min-height: 360px; display: flex; flex-direction: column; }
+    .trend-chart { flex: 1; min-height: 300px; height: auto; }
+    .proc-section { flex: 1; height: auto; min-height: 420px; }
+    .proc-table { min-height: 0; }
+  }
+  @media (min-width: 1800px) {
+    .trend-card { min-height: 440px; }
+    .trend-chart { min-height: 372px; }
+    .proc-section { min-height: 500px; }
+  }
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: flex; align-items: center; justify-content: center; }
   .modal { width: 500px; max-width: 90vw; max-height: 80vh; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }
   .modal-xl { width: 95vw; max-width: 1200px; height: 85vh; }
@@ -856,8 +894,11 @@
   .modal-close { background: none; border: none; color: var(--text-tertiary); font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
   .modal-close:hover { background: var(--bg-hover); }
   .proc-table { width: 100%; }
-  .proc-header { display: grid; grid-template-columns: 40px 1fr 80px 100px; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; }
-  .proc-row { display: grid; grid-template-columns: 40px 1fr 80px 100px; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-secondary); font-size: 12px; }
+  .proc-header { display: grid; grid-template-columns: 40px minmax(140px, 1fr) 80px 100px; gap: 8px; min-width: 380px; padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; flex: 0 0 auto; }
+  .proc-sort { border: none; background: transparent; color: inherit; font: inherit; text-transform: inherit; padding: 0; text-align: left; cursor: pointer; }
+  .proc-sort:hover { color: var(--text-primary); }
+  .proc-list { flex: 1; min-height: 0; min-width: 380px; overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
+  .proc-row { display: grid; grid-template-columns: 40px minmax(140px, 1fr) 80px 100px; align-items: center; gap: 8px; min-width: 380px; min-height: 30px; padding: 6px 0; border-bottom: 1px solid var(--border-secondary); font-size: 12px; }
   .proc-row:hover { background: var(--bg-hover); }
   .proc-row.proc-warning { background: rgba(245,158,11,0.05); }
   .proc-row.proc-critical { background: rgba(239,68,68,0.05); }
@@ -865,12 +906,12 @@
   .proc-col-name { color: var(--text-primary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .proc-col-cpu { font-weight: 600; font-family: var(--theme-font-family-mono); }
   .proc-col-mem { color: var(--text-secondary); font-family: var(--theme-font-family-mono); }
-  .process-table { width: 100%; }
-  .process-header { display: grid; grid-template-columns: 40px 80px 120px 1fr 80px 100px 80px; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; }
+  .process-table { width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+  .process-header { display: grid; grid-template-columns: 40px 80px 140px minmax(360px, 1fr) 80px 100px 80px; gap: 8px; min-width: 900px; padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; }
   .process-sort { border: none; background: transparent; color: inherit; font: inherit; text-transform: inherit; padding: 0; text-align: left; cursor: pointer; }
   .process-sort:hover { color: var(--text-primary); }
-  .process-list { max-height: 60vh; overflow-y: auto; }
-  .process-row { display: grid; grid-template-columns: 40px 80px 120px 1fr 80px 100px 80px; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-secondary); font-size: 12px; }
+  .process-list { max-height: 60vh; overflow-y: auto; min-width: 900px; }
+  .process-row { display: grid; grid-template-columns: 40px 80px 140px minmax(360px, 1fr) 80px 100px 80px; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-secondary); font-size: 12px; }
   .process-row:hover { background: var(--bg-hover); }
   .process-row.proc-warning { background: rgba(245,158,11,0.05); }
   .process-row.proc-critical { background: rgba(239,68,68,0.05); }

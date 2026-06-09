@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::config::Config;
 use crate::db::{AlertRecord, Database, ExecRecord};
-use crate::script::metadata::ScriptMetadata;
+use crate::script::metadata::{ScriptMetadata, ScriptParam};
 use crate::script::{self, Script};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -24,6 +24,18 @@ const RULE_OVERRIDE_KEYS: &[&str] = &[
     "summary",
     "suggestion",
     "commands",
+];
+const RULE_CREATE_KEYS: &[&str] = &[
+    "enabled",
+    "level",
+    "title",
+    "summary",
+    "suggestion",
+    "commands",
+    "category",
+    "target",
+    "condition",
+    "description",
 ];
 
 fn validate_id(id: &str) -> Result<(), StatusCode> {
@@ -40,6 +52,18 @@ fn validate_id(id: &str) -> Result<(), StatusCode> {
 
 fn validate_non_empty(s: &str, max_len: usize) -> Result<(), StatusCode> {
     if s.trim().is_empty() || s.len() > max_len {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn validate_rule_id_string(id: &str) -> Result<(), StatusCode> {
+    if id.is_empty()
+        || id.len() > 160
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(())
@@ -108,6 +132,120 @@ pub struct RunRequest {
     pub args: Vec<String>,
 }
 
+fn run_request_params_value(req: &RunRequest) -> serde_json::Value {
+    serde_json::to_value(&req.params).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn valid_script_param_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn validate_script_params(params: &[ScriptParam]) -> Result<(), StatusCode> {
+    if params.len() > 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut names = HashSet::new();
+    for param in params {
+        let name = param.name.trim();
+        if name.len() > 64 || !valid_script_param_name(name) || !names.insert(name.to_string()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !matches!(
+            param.param_type.as_str(),
+            "string" | "number" | "boolean" | "select"
+        ) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if param.description.len() > 512 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if param
+            .default
+            .as_ref()
+            .is_some_and(|value| value.len() > 256)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    Ok(())
+}
+
+fn parse_script_params_json(text: &str) -> Result<Vec<ScriptParam>, StatusCode> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let params: Vec<ScriptParam> =
+        serde_json::from_str(text).map_err(|_| StatusCode::BAD_REQUEST)?;
+    validate_script_params(&params)?;
+    Ok(params)
+}
+
+const SUPPORTED_SCRIPT_EXTENSIONS: &[&str] = &[
+    "sh", "bash", "zsh", "ksh", "py", "python", "js", "mjs", "pl", "perl", "rb", "lua", "php",
+    "awk", "expect", "exp", "run", "bin",
+];
+
+fn script_extension_from_filename(filename: &str) -> Result<String, StatusCode> {
+    let path = std::path::Path::new(filename);
+    if path.components().count() != 1 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ext = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "sh".to_string());
+    if SUPPORTED_SCRIPT_EXTENSIONS.contains(&ext.as_str()) {
+        Ok(ext)
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+fn set_executable_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+fn sync_log_path_cache_from_config(state: &AppState, check_id: &str, value: &serde_json::Value) {
+    let Some(path) = value
+        .get("log_path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return;
+    };
+    let _ = state
+        .db
+        .save_service_log_cache(check_id, path, "imported-check-config");
+    if let Some(prefix) = value
+        .get("service_prefix")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        for name in prefix.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+            let _ = state
+                .db
+                .save_service_log_cache(name, path, "imported-check-config");
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct ScriptListResponse {
     pub scripts: Vec<Script>,
@@ -162,6 +300,8 @@ pub struct UpdateScriptRequest {
     pub category: String,
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
+    pub params: Option<Vec<ScriptParam>>,
 }
 
 #[derive(Serialize)]
@@ -171,6 +311,7 @@ pub struct ScriptStatsResponse {
     pub success_count: usize,
     pub failure_count: usize,
     pub avg_duration_ms: Option<f64>,
+    pub last_execution: Option<crate::db::ExecRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,10 +346,20 @@ pub struct ServiceLogsQuery {
     pub process: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ServiceHealthQuery {
+    pub pid: Option<u32>,
+    pub path: Option<String>,
+    pub category: Option<String>,
+    pub process: Option<String>,
+    pub ports: Option<String>,
+}
+
 const HEALTH_CHECK_IDS: &[&str] = &[
     "system",
     "resource",
     "service",
+    "service-manage",
     "network",
     "security",
     "middleware",
@@ -217,6 +368,7 @@ const HEALTH_CHECK_IDS: &[&str] = &[
     "nginx",
     "keepalived",
     "mysql",
+    "kafka",
     "java-service",
 ];
 
@@ -304,12 +456,14 @@ pub async fn get_script_stats(
 ) -> Result<Json<ScriptStatsResponse>, StatusCode> {
     validate_id(&id)?;
     let (total, success, failure, avg_dur) = state.db.get_script_stats(&id);
+    let last_execution = state.db.get_history(Some(&id), 1).into_iter().next();
     Ok(Json(ScriptStatsResponse {
         script_id: id,
         total_executions: total,
         success_count: success,
         failure_count: failure,
         avg_duration_ms: avg_dur,
+        last_execution,
     }))
 }
 
@@ -381,7 +535,7 @@ pub async fn duplicate_script(
 pub async fn run_script(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(_req): Json<RunRequest>,
+    Json(req): Json<RunRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     validate_id(&id)?;
     let dirs = crate::config::all_script_dirs(&state.config);
@@ -389,9 +543,15 @@ pub async fn run_script(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    state
-        .db
-        .insert_exec(&script.id, &script.name, None, None, 0);
+    state.db.insert_exec_with_inputs(
+        &script.id,
+        &script.name,
+        None,
+        None,
+        0,
+        &run_request_params_value(&req),
+        &req.args,
+    );
 
     Ok(Json(serde_json::json!({
         "status": "started",
@@ -477,6 +637,37 @@ pub async fn system_info(State(_state): State<AppState>) -> Json<crate::dashboar
     Json(sys)
 }
 
+pub async fn traffic_interfaces(State(_state): State<AppState>) -> Json<serde_json::Value> {
+    let sys = tokio::task::spawn_blocking(crate::dashboard::get_system_info)
+        .await
+        .unwrap_or_else(|_| crate::dashboard::get_system_info());
+    let mut interfaces: Vec<serde_json::Value> = sys
+        .networks
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "name": n.name,
+                "ip": n.ip,
+                "mac": n.mac,
+                "received_bytes": n.received_bytes,
+                "transmitted_bytes": n.transmitted_bytes,
+            })
+        })
+        .collect();
+
+    interfaces.sort_by(|a, b| {
+        let a_name = a["name"].as_str().unwrap_or_default();
+        let b_name = b["name"].as_str().unwrap_or_default();
+        a_name.cmp(b_name)
+    });
+
+    Json(serde_json::json!({
+        "interfaces": interfaces,
+        "capture_supported": cfg!(target_os = "linux"),
+        "platform": std::env::consts::OS,
+    }))
+}
+
 pub async fn clear_history(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -536,6 +727,7 @@ pub async fn upload_script(
     let mut author = "user".to_string();
     let mut filename = String::new();
     let mut bytes: Option<Vec<u8>> = None;
+    let mut params: Vec<ScriptParam> = Vec::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -565,6 +757,7 @@ pub async fn upload_script(
             "feature" => feature = text,
             "category" => category = text,
             "author" => author = text,
+            "params" => params = parse_script_params_json(&text)?,
             _ => {}
         }
     }
@@ -597,21 +790,10 @@ pub async fn upload_script(
     }
     std::fs::create_dir_all(&script_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let ext = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|v| v.to_str())
-        .unwrap_or("sh");
+    let ext = script_extension_from_filename(&filename)?;
     let script_file = script_dir.join(format!("{}.{}", script_id, ext));
     std::fs::write(&script_file, &bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(&script_file) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o755);
-            let _ = std::fs::set_permissions(&script_file, perms);
-        }
-    }
+    set_executable_permissions(&script_file);
     write_script_metadata(
         &script_dir,
         &ScriptMetadata {
@@ -622,7 +804,7 @@ pub async fn upload_script(
             version: "1.0.0".to_string(),
             author,
             category,
-            params: Vec::new(),
+            params,
         },
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -633,6 +815,65 @@ pub async fn upload_script(
         "filename": filename,
         "path": script_file.display().to_string(),
         "message": "脚本上传成功"
+    })))
+}
+
+pub async fn replace_script_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    validate_id(&id)?;
+    let dirs = crate::config::all_script_dirs(&state.config);
+    let script = script::find_script(&dirs, &id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !is_user_script(&state.config, &script) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mut filename = String::new();
+    let mut bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        if field.name().unwrap_or("") != "file" {
+            continue;
+        }
+        filename = field
+            .file_name()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| format!("{}.sh", id));
+        bytes = Some(
+            field
+                .bytes()
+                .await
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .to_vec(),
+        );
+    }
+
+    let bytes = bytes.ok_or(StatusCode::BAD_REQUEST)?;
+    let script_dir = script
+        .path
+        .parent()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let ext = script_extension_from_filename(&filename)?;
+    let next_path = script_dir.join(format!("{}.{}", id, ext));
+    if next_path != script.path && script.path.exists() {
+        std::fs::remove_file(&script.path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    std::fs::write(&next_path, bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    set_executable_permissions(&next_path);
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "id": id,
+        "filename": filename,
+        "path": next_path.display().to_string(),
+        "message": "脚本文件已更新"
     })))
 }
 
@@ -678,6 +919,12 @@ pub async fn update_script(
         category: "维护脚本".to_string(),
         params: Vec::new(),
     });
+    let params = if let Some(params) = req.params {
+        validate_script_params(&params)?;
+        params
+    } else {
+        current.params.clone()
+    };
     let meta = ScriptMetadata {
         name: if req.name.trim().is_empty() {
             current.name
@@ -714,7 +961,7 @@ pub async fn update_script(
         } else {
             req.category
         },
-        params: current.params,
+        params,
     };
     write_script_metadata(script_dir, &meta).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(
@@ -776,11 +1023,13 @@ pub async fn get_check_config(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     validate_id(&id)?;
+    let value = crate::check_config_store::load_config_value(&state.config, &state.db, &id);
     let record = state.db.get_check_config(&id);
     Ok(Json(serde_json::json!({
         "check_id": id,
-        "value": record.as_ref().map(|r| r.value.clone()).unwrap_or_else(|| serde_json::json!({})),
+        "value": value.unwrap_or_else(|| serde_json::json!({})),
         "updated_at": record.map(|r| r.updated_at).unwrap_or_default(),
+        "config_file": crate::check_config_store::connection_config_path(&state.config).display().to_string(),
     })))
 }
 
@@ -814,80 +1063,23 @@ pub async fn update_check_config(
         }
     }
 
-    if !state.db.save_check_config(&id, &req) {
+    if !crate::check_config_store::upsert_and_sync(&state.config, &state.db, &id, &req) {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
+    sync_log_path_cache_from_config(&state, &id, &req);
     let record = state.db.get_check_config(&id);
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "message": "检查配置已保存",
+        "message": "检查配置已保存，并已同步到连接配置文件",
         "check_id": id,
         "value": record.as_ref().map(|r| r.value.clone()).unwrap_or(req),
         "updated_at": record.map(|r| r.updated_at).unwrap_or_default(),
+        "config_file": crate::check_config_store::connection_config_path(&state.config).display().to_string(),
     })))
 }
 
-const CONFIGURABLE_CHECK_IDS: &[&str] = &[
-    "elasticsearch",
-    "redis",
-    "nginx",
-    "keepalived",
-    "mysql",
-    "java-service",
-];
-
 fn check_config_template_value() -> serde_json::Value {
-    serde_json::json!({
-        "version": 1,
-        "description": "DM 常规检查连接配置导入模板。只需要填写关键连接信息；config_path/data_path/log_path/program_path 可以留空，系统会根据进程、systemd、命令行参数和配置文件自动推断。",
-        "configs": {
-            "elasticsearch": {
-                "url": "http://127.0.0.1:9200",
-                "host": "127.0.0.1",
-                "port": "9200",
-                "username": "",
-                "password": "",
-                "config_path": "",
-                "data_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "redis": {
-                "host": "127.0.0.1",
-                "port": "6379",
-                "password": "",
-                "config_path": "",
-                "data_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "nginx": {
-                "config_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "keepalived": {
-                "config_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "mysql": {
-                "host": "127.0.0.1",
-                "port": "3306",
-                "username": "root",
-                "password": "",
-                "config_path": "",
-                "data_path": "",
-                "log_path": "",
-                "program_path": ""
-            },
-            "java-service": {
-                "service_prefix": "",
-                "log_path": "",
-                "program_path": ""
-            }
-        }
-    })
+    crate::check_config_store::template_value()
 }
 
 fn normalize_check_config_import_payload(
@@ -913,7 +1105,7 @@ fn normalize_check_config_import_payload(
         if check_id == "version" || check_id == "description" {
             continue;
         }
-        if !CONFIGURABLE_CHECK_IDS.contains(&check_id.as_str()) {
+        if !crate::check_config_store::is_configurable_check_id(check_id) {
             skipped.push(check_id.to_string());
             continue;
         }
@@ -935,6 +1127,12 @@ pub async fn check_config_template() -> Json<serde_json::Value> {
     Json(check_config_template_value())
 }
 
+pub async fn export_check_configs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let value = crate::check_config_store::export_value(&state.config, &state.db);
+    let _ = crate::check_config_store::sync_db_to_file(&state.config, &state.db);
+    Json(value)
+}
+
 pub async fn import_check_configs(
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
@@ -950,7 +1148,7 @@ pub async fn import_check_configs(
         })));
     }
 
-    let mut saved = Vec::new();
+    let mut to_save = Vec::new();
     for (check_id, mut value) in imported.drain(..) {
         if value
             .get("password")
@@ -968,10 +1166,11 @@ pub async fn import_check_configs(
                 }
             }
         }
-        if state.db.save_check_config(&check_id, &value) {
-            saved.push(check_id);
-        }
+        sync_log_path_cache_from_config(&state, &check_id, &value);
+        to_save.push((check_id, value));
     }
+    let saved =
+        crate::check_config_store::import_configs_and_sync(&state.config, &state.db, to_save);
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -979,7 +1178,8 @@ pub async fn import_check_configs(
         "check_ids": saved,
         "skipped": skipped,
         "errors": errors,
-        "message": format!("已导入 {} 个检查连接配置，后续检查会直接读取数据库配置", saved.len()),
+        "config_file": crate::check_config_store::connection_config_path(&state.config).display().to_string(),
+        "message": format!("已导入 {} 个检查连接配置，并已同步到连接配置文件", saved.len()),
     })))
 }
 
@@ -1032,6 +1232,55 @@ pub async fn create_doc_api(
         Ok(meta) => Ok(Json(serde_json::to_value(meta).unwrap_or_default())),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+pub async fn import_doc_api(
+    State(_state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut filename = String::new();
+    let mut title = String::new();
+    let mut category = String::new();
+    let mut content = String::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            filename = field.file_name().unwrap_or("uploaded-doc.md").to_string();
+            let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            content = String::from_utf8_lossy(&bytes).to_string();
+        } else {
+            let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            match name.as_str() {
+                "title" => title = text,
+                "category" => category = text,
+                _ => {}
+            }
+        }
+    }
+    if content.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let parsed = parse_import_text(&content, &filename);
+    let title = first_non_empty(&[title.as_str(), parsed.title.as_str(), "导入文档"]);
+    let category = first_non_empty(&[category.as_str(), parsed.category.as_str(), "导入文档"]);
+    let id = slug_id_from(&filename, &title);
+    validate_id(&id)?;
+    let body = parsed.body;
+    let meta = if crate::docs::get_doc(&id).is_some() {
+        crate::docs::update_doc(&id, Some(&title), Some(&category), None, Some(&body))
+    } else {
+        crate::docs::create_doc(&id, &title, &category, &body)
+    }
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "doc": meta,
+        "message": "文档已导入并自动解析标题/分类"
+    })))
 }
 
 pub async fn delete_doc_api(
@@ -1213,6 +1462,172 @@ pub async fn create_maintenance(
     ) {
         Ok(record) => Ok(Json(serde_json::to_value(record).unwrap_or_default())),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+pub async fn import_maintenance_api(
+    State(_state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut filename = String::new();
+    let mut title = String::new();
+    let mut category = String::new();
+    let mut operator = String::new();
+    let mut content = String::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            filename = field.file_name().unwrap_or("maintenance.txt").to_string();
+            let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            content = String::from_utf8_lossy(&bytes).to_string();
+        } else {
+            let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            match name.as_str() {
+                "title" => title = text,
+                "category" => category = text,
+                "operator" => operator = text,
+                _ => {}
+            }
+        }
+    }
+    if content.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let parsed = parse_import_text(&content, &filename);
+    let title = first_non_empty(&[title.as_str(), parsed.title.as_str(), "导入维护记录"]);
+    let category = first_non_empty(&[category.as_str(), parsed.category.as_str(), "导入记录"]);
+    let operator = first_non_empty(&[operator.as_str(), parsed.operator.as_str(), "system"]);
+    let record = crate::maintenance::create_record(&title, &parsed.body, &category, &operator)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "record": record,
+        "message": "维护记录已导入并自动解析标题/分类/操作人"
+    })))
+}
+
+struct ParsedImportText {
+    title: String,
+    category: String,
+    operator: String,
+    body: String,
+}
+
+fn parse_import_text(raw: &str, filename: &str) -> ParsedImportText {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        if value.is_object() {
+            return ParsedImportText {
+                title: value
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                category: value
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                operator: value
+                    .get("operator")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                body: value
+                    .get("content")
+                    .or_else(|| value.get("description"))
+                    .or_else(|| value.get("body"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(raw)
+                    .trim()
+                    .to_string(),
+            };
+        }
+    }
+    let mut title = String::new();
+    let mut category = String::new();
+    let mut operator = String::new();
+    let mut body_lines = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if title.is_empty() && trimmed.starts_with("# ") {
+            title = trimmed.trim_start_matches("# ").trim().to_string();
+            continue;
+        }
+        if let Some(value) = trimmed
+            .strip_prefix("category:")
+            .or_else(|| trimmed.strip_prefix("分类:"))
+        {
+            category = value.trim().to_string();
+            continue;
+        }
+        if let Some(value) = trimmed
+            .strip_prefix("operator:")
+            .or_else(|| trimmed.strip_prefix("操作人:"))
+        {
+            operator = value.trim().to_string();
+            continue;
+        }
+        body_lines.push(line);
+    }
+    if title.is_empty() {
+        title = raw
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(filename)
+            .trim_matches('#')
+            .trim()
+            .chars()
+            .take(80)
+            .collect();
+    }
+    ParsedImportText {
+        title,
+        category,
+        operator,
+        body: body_lines.join("\n").trim().to_string(),
+    }
+}
+
+fn first_non_empty(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|v| v.trim())
+        .find(|v| !v.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn slug_id_from(filename: &str, title: &str) -> String {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or(title);
+    let mut id: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    id = id.trim_matches('-').chars().take(96).collect();
+    if id.is_empty() {
+        format!("import-{}", chrono::Local::now().timestamp())
+    } else {
+        id
     }
 }
 
@@ -1447,6 +1862,12 @@ fn build_checks_export_with_overrides(
         "ok"
     };
 
+    let result_context = serde_json::json!(checks);
+    alerts.extend(custom_rule_alerts(
+        overrides,
+        &alerts,
+        Some(&result_context),
+    ));
     let alerts = dedupe_alerts(alerts);
     serde_json::json!({
         "exported_at": alert_timestamp(),
@@ -1509,6 +1930,13 @@ fn build_full_health_check_with_overrides(
     } else {
         "ok"
     };
+
+    let result_context = serde_json::json!(results);
+    alerts.extend(custom_rule_alerts(
+        overrides,
+        &alerts,
+        Some(&result_context),
+    ));
 
     serde_json::json!({
         "overall_status": overall,
@@ -1626,9 +2054,14 @@ fn run_full_health_task(state: AppState, task_id: String) {
                 results.push(serde_json::json!({
                     "id": result.id,
                     "name": result.name,
+                    "description": result.description,
+                    "category": result.category,
+                    "version": result.version,
                     "status": result.status,
+                    "timestamp": result.timestamp,
                     "duration_ms": result.duration_ms,
-                    "sections": result.sections.len(),
+                    "section_count": result.sections.len(),
+                    "sections": result.sections,
                     "warnings": counts.0,
                     "errors": counts.1,
                 }));
@@ -1647,6 +2080,26 @@ fn run_full_health_task(state: AppState, task_id: String) {
                     ));
                     task.logs = tail_task_logs(&task.logs);
                 });
+                results.push(serde_json::json!({
+                    "id": id,
+                    "name": check_display_name(id),
+                    "status": "warn",
+                    "timestamp": alert_timestamp(),
+                    "duration_ms": 0,
+                    "section_count": 1,
+                    "sections": [{
+                        "title": "检查无结果",
+                        "icon": "WARN",
+                        "description": "该检查项没有返回可渲染结果",
+                        "items": [{
+                            "type": "warning",
+                            "text": "检查项没有返回结构化结果，请单独执行定位原因",
+                            "details": format!("检查ID: {}\n建议命令: dm check {}", id, id)
+                        }]
+                    }],
+                    "warnings": 1,
+                    "errors": 0,
+                }));
             }
         }
     }
@@ -1658,6 +2111,12 @@ fn run_full_health_task(state: AppState, task_id: String) {
     } else {
         "ok"
     };
+    let result_context = serde_json::json!(results);
+    alerts.extend(custom_rule_alerts(
+        &overrides,
+        &alerts,
+        Some(&result_context),
+    ));
     let alerts = apply_rule_overrides_to_alerts(dedupe_alerts(alerts), &overrides);
     if !alerts.is_empty() {
         state.db.upsert_active_alerts(&alerts);
@@ -2085,6 +2544,200 @@ fn overrides_from_db(state: &AppState) -> HashMap<String, serde_json::Value> {
         .into_iter()
         .map(|r| (r.rule_id, r.value))
         .collect()
+}
+
+fn custom_rules_from_overrides(
+    overrides: &HashMap<String, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut rules = Vec::new();
+    for (id, value) in overrides {
+        if value.get("custom").and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+        rules.push(serde_json::json!({
+            "id": id,
+            "enabled": value.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+            "level": value.get("level").and_then(|v| v.as_str()).unwrap_or("warn"),
+            "title": value.get("title").and_then(|v| v.as_str()).unwrap_or(id),
+            "summary": value.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+            "suggestion": value.get("suggestion").and_then(|v| v.as_str()).unwrap_or(""),
+            "commands": value.get("commands").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+            "category": value.get("category").and_then(|v| v.as_str()).unwrap_or("自定义规则"),
+            "target": value.get("target").and_then(|v| v.as_str()).unwrap_or("system"),
+            "condition": value.get("condition").and_then(|v| v.as_str()).unwrap_or(""),
+            "description": value.get("description").and_then(|v| v.as_str()).unwrap_or("用户新增规则，保存后实时参与告警刷新。"),
+            "signals": value.get("signals").and_then(|v| v.as_array()).cloned().unwrap_or_else(|| {
+                vec![serde_json::json!(value.get("condition").and_then(|v| v.as_str()).unwrap_or(""))]
+            }),
+            "custom": true,
+            "override": value,
+        }));
+    }
+    rules.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["id"].as_str().unwrap_or_default())
+    });
+    rules
+}
+
+fn normalize_custom_rule_payload(
+    payload: &serde_json::Value,
+    existing_ids: &HashSet<String>,
+) -> Result<(String, serde_json::Value), String> {
+    let id = payload
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "规则 ID 不能为空".to_string())?;
+    validate_rule_id_string(id)
+        .map_err(|_| "规则 ID 只能包含字母、数字、点、横线和下划线".to_string())?;
+    if existing_ids.contains(id) {
+        return Err("规则 ID 已存在，请换一个 ID".to_string());
+    }
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "规则标题不能为空".to_string())?;
+    if title.len() > MAX_TITLE_LEN {
+        return Err("规则标题过长".to_string());
+    }
+    let level = payload
+        .get("level")
+        .and_then(|v| v.as_str())
+        .unwrap_or("warn")
+        .trim();
+    if !["info", "warn", "error"].contains(&level) {
+        return Err("级别只能是 info/warn/error".to_string());
+    }
+    let mut value = serde_json::json!({
+        "custom": true,
+        "enabled": payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        "level": level,
+        "title": title,
+        "category": payload.get("category").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).unwrap_or("自定义规则"),
+        "target": payload.get("target").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).unwrap_or("system"),
+        "condition": payload.get("condition").and_then(|v| v.as_str()).map(str::trim).unwrap_or(""),
+        "summary": payload.get("summary").and_then(|v| v.as_str()).map(str::trim).unwrap_or(""),
+        "suggestion": payload.get("suggestion").and_then(|v| v.as_str()).map(str::trim).unwrap_or(""),
+        "description": payload.get("description").and_then(|v| v.as_str()).map(str::trim).unwrap_or("用户新增规则"),
+        "updated_at": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    });
+    if let Some(commands) = payload.get("commands") {
+        if !commands
+            .as_array()
+            .map(|items| items.iter().all(|v| v.as_str().is_some()))
+            .unwrap_or(false)
+        {
+            return Err("commands 必须是字符串数组".to_string());
+        }
+        value["commands"] = commands.clone();
+    } else {
+        value["commands"] = serde_json::json!([]);
+    }
+    value["signals"] = serde_json::json!(value["condition"]
+        .as_str()
+        .unwrap_or("")
+        .split([',', '\n', '|'])
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>());
+    Ok((id.to_string(), value))
+}
+
+fn custom_rule_condition_matches(condition: &str, context: &str) -> bool {
+    let tokens: Vec<String> = condition
+        .split([',', '\n', '|'])
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .collect();
+    !tokens.is_empty() && tokens.iter().all(|token| context.contains(token))
+}
+
+fn custom_rule_alerts(
+    overrides: &HashMap<String, serde_json::Value>,
+    existing_alerts: &[serde_json::Value],
+    extra_context: Option<&serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut context = serde_json::to_string(existing_alerts)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if let Some(extra) = extra_context {
+        context.push_str(
+            &serde_json::to_string(extra)
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+        );
+    }
+    let mut alerts = Vec::new();
+    for (id, rule) in overrides {
+        if rule.get("custom").and_then(|v| v.as_bool()) != Some(true)
+            || matches!(rule.get("enabled").and_then(|v| v.as_bool()), Some(false))
+        {
+            continue;
+        }
+        let condition = rule.get("condition").and_then(|v| v.as_str()).unwrap_or("");
+        if !custom_rule_condition_matches(condition, &context) {
+            continue;
+        }
+        let title = rule
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(id)
+            .to_string();
+        let summary = rule
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or("自定义规则条件已命中")
+            .to_string();
+        let suggestion = rule
+            .get("suggestion")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or("查看本次检查结果与告警证据，按自定义规则建议处理")
+            .to_string();
+        let commands = rule
+            .get("commands")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        alerts.push(alert_value(
+            format!("custom-rule-{}", id),
+            rule.get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("custom"),
+            rule.get("level").and_then(|v| v.as_str()).unwrap_or("warn"),
+            title,
+            summary,
+            vec![
+                format!("规则ID: {}", id),
+                format!("条件: {}", condition),
+                "自定义规则在当前检查/告警上下文中命中".to_string(),
+            ],
+            vec![suggestion],
+            commands,
+        ));
+        if let Some(last) = alerts.last_mut().and_then(|v| v.as_object_mut()) {
+            last.insert("rule_id".to_string(), serde_json::json!(id));
+            last.insert(
+                "target".to_string(),
+                rule.get("target")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("system")),
+            );
+        }
+    }
+    alerts
 }
 
 fn infer_alert_rule_id(alert: &serde_json::Value) -> String {
@@ -2891,6 +3544,8 @@ fn analyze_alerts(state: &AppState) -> serde_json::Value {
         ));
     }
 
+    let sys_context = serde_json::to_value(&sys).unwrap_or_default();
+    alerts.extend(custom_rule_alerts(&overrides, &alerts, Some(&sys_context)));
     alerts = normalize_alert_identities(apply_rule_overrides_to_alerts(
         dedupe_alerts(alerts),
         &overrides,
@@ -3073,6 +3728,7 @@ pub async fn list_rules(State(state): State<AppState>) -> Json<serde_json::Value
         .map(|r| (r.rule_id, r.value))
         .collect();
     let mut rules = crate::anomaly::rule_catalog();
+    rules.extend(custom_rules_from_overrides(&overrides));
     for rule in &mut rules {
         if let Some(id) = rule
             .get("id")
@@ -3120,23 +3776,38 @@ pub async fn update_rule(
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     validate_non_empty(&id, 160)?;
+    validate_rule_id_string(&id)?;
+    let overrides = overrides_from_db(&state);
     let exists = crate::anomaly::rule_catalog()
         .iter()
-        .any(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        .any(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        || overrides
+            .get(&id)
+            .is_some_and(|v| v.get("custom").and_then(|v| v.as_bool()) == Some(true));
     if !exists {
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut value = serde_json::json!({});
-    for key in [
-        "enabled",
-        "level",
-        "title",
-        "summary",
-        "suggestion",
-        "commands",
-    ] {
+    let mut value = overrides
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    for key in RULE_CREATE_KEYS {
         if let Some(v) = req.get(key) {
-            value[key] = v.clone();
+            value[*key] = v.clone();
+        }
+    }
+    if let Some(level) = value.get("level").and_then(|v| v.as_str()) {
+        if !["info", "warn", "error"].contains(&level) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    if let Some(commands) = value.get("commands") {
+        if !commands
+            .as_array()
+            .map(|items| items.iter().all(|v| v.as_str().is_some()))
+            .unwrap_or(false)
+        {
+            return Err(StatusCode::BAD_REQUEST);
         }
     }
     value["updated_at"] =
@@ -3151,6 +3822,34 @@ pub async fn update_rule(
         "rule": value,
         "alerts": refreshed["total"],
         "message": "规则已保存并实时生效",
+    })))
+}
+
+pub async fn create_rule(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if serde_json::to_string(&req).unwrap_or_default().len() > 128 * 1024 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let overrides = overrides_from_db(&state);
+    let mut existing_ids: HashSet<String> = crate::anomaly::rule_catalog()
+        .iter()
+        .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    existing_ids.extend(overrides.keys().cloned());
+    let (id, value) =
+        normalize_custom_rule_payload(&req, &existing_ids).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !state.db.save_rule_override(&id, &value) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let refreshed = refresh_alert_cache(&state);
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "rule_id": id,
+        "rule": value,
+        "alerts": refreshed["total"],
+        "message": "自定义规则已新增并实时生效",
     })))
 }
 
@@ -3274,7 +3973,7 @@ pub async fn import_rules(
 }
 
 pub async fn get_service_logs(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<ServiceLogsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -3347,6 +4046,16 @@ pub async fn get_service_logs(
         }
     }
 
+    let mut preferred_paths = Vec::new();
+    if let Some(config) = state.db.get_check_config(&safe_name) {
+        if let Some(path) = config.value.get("log_path").and_then(|v| v.as_str()) {
+            push_log_candidate(&mut preferred_paths, path);
+        }
+    }
+    if let Some((path, source, updated_at)) = state.db.get_service_log_cache(&safe_name) {
+        tried.push(format!("cache:{}:{}", source, updated_at));
+        push_log_candidate(&mut preferred_paths, path);
+    }
     let inferred_paths = infer_service_log_paths(
         &safe_name,
         query.pid,
@@ -3355,6 +4064,9 @@ pub async fn get_service_logs(
         Some(&process_name),
     );
     for path in inferred_paths {
+        push_log_candidate(&mut preferred_paths, path);
+    }
+    for path in preferred_paths {
         tried.push(path.clone());
         let p = std::path::PathBuf::from(&path);
         if p.exists() && p.is_file() {
@@ -3365,6 +4077,11 @@ pub async fn get_service_logs(
                 let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !text.is_empty() {
                     sources.push(path.clone());
+                    let _ = state.db.save_service_log_cache(
+                        &safe_name,
+                        &path,
+                        "inferred-readable-path",
+                    );
                     parts.push(format!("===== {} =====\n{}", path, text));
                 }
             }
@@ -3549,17 +4266,36 @@ fn infer_service_log_paths(
 pub async fn check_service_health(
     State(_state): State<AppState>,
     Path(name): Path<String>,
+    Query(query): Query<ServiceHealthQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     validate_non_empty(&name, 128)?;
     let safe_name = sanitize_service_name(&name)?;
+    let process_name = query
+        .process
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| service_process_candidate(v.trim()))
+        .unwrap_or_else(|| service_process_candidate(&safe_name));
 
     let mut health_info = serde_json::json!({
         "service": safe_name,
+        "process": process_name.clone(),
+        "query_context": {
+            "pid": query.pid,
+            "path": query.path.clone(),
+            "category": query.category.clone(),
+            "ports": query.ports.clone(),
+        },
         "timestamp": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     });
 
+    let unit_name = if safe_name.ends_with(".service") {
+        safe_name.clone()
+    } else {
+        format!("{}.service", safe_name)
+    };
     let systemctl_output = std::process::Command::new("systemctl")
-        .args(["is-active", &safe_name])
+        .args(["is-active", &unit_name])
         .output();
 
     if let Ok(output) = systemctl_output {
@@ -3568,19 +4304,69 @@ pub async fn check_service_health(
         health_info["is_active"] = serde_json::json!(status == "active");
     }
 
+    if let Ok(output) = std::process::Command::new("systemctl")
+        .args([
+            "show",
+            &unit_name,
+            "--property=Id,LoadState,ActiveState,SubState,MainPID,ExecMainStatus,RestartUSec,FragmentPath",
+            "--no-pager",
+        ])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut props = serde_json::Map::new();
+        let mut systemd_pids = Vec::new();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            props.insert(key.to_string(), serde_json::json!(value));
+            if matches!(key, "MainPID" | "ControlPID") {
+                if value != "0" && !value.trim().is_empty() {
+                    systemd_pids.push(value.to_string());
+                }
+            }
+        }
+        if !props.is_empty() {
+            health_info["systemd_properties"] = serde_json::json!(props);
+        }
+        if !systemd_pids.is_empty() {
+            health_info["systemd_pids"] = serde_json::json!(systemd_pids);
+        }
+    }
+
+    let mut pid_values: Vec<String> = health_info["systemd_pids"]
+        .as_array()
+        .map(|pids| {
+            pids.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(pid) = query.pid {
+        if pid > 0 {
+            pid_values.push(pid.to_string());
+        }
+    }
     let pid_output = std::process::Command::new("pgrep")
-        .args(["-f", &safe_name])
+        .args(["-f", &process_name])
         .output();
 
     if let Ok(output) = pid_output {
         let pids = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let pid_list: Vec<&str> = pids.lines().filter(|l| !l.is_empty()).collect();
-        health_info["pids"] = serde_json::json!(pid_list);
-        health_info["process_count"] = serde_json::json!(pid_list.len());
-        health_info["is_running"] = serde_json::json!(!pid_list.is_empty());
+        pid_values.extend(
+            pids.lines()
+                .filter(|l| !l.is_empty())
+                .map(|v| v.to_string()),
+        );
+        pid_values.sort();
+        pid_values.dedup();
+        health_info["pids"] = serde_json::json!(pid_values);
+        health_info["process_count"] = serde_json::json!(pid_values.len());
+        health_info["is_running"] = serde_json::json!(!pid_values.is_empty());
 
         let mut process_rows = Vec::new();
-        for pid in &pid_list {
+        for pid in &pid_values {
             if let Ok(ps) = std::process::Command::new("ps")
                 .args([
                     "-p",
@@ -3626,25 +4412,103 @@ pub async fn check_service_health(
     let port_output = std::process::Command::new("ss").args(["-tulnp"]).output();
     if let Ok(output) = port_output {
         let ss_info = String::from_utf8_lossy(&output.stdout);
-        let ports: Vec<&str> = ss_info
+        let ports: Vec<String> = ss_info
             .lines()
             .filter(|l| {
                 l.contains(&safe_name)
+                    || l.contains(&process_name)
                     || health_info["pids"].as_array().is_some_and(|pids| {
                         pids.iter()
                             .any(|p| p.as_str().is_some_and(|pid| l.contains(pid)))
                     })
             })
+            .map(|line| line.to_string())
             .collect();
         health_info["listening_ports"] = serde_json::json!(ports);
     } else {
         health_info["listening_ports"] = serde_json::json!([]);
     }
 
+    if let Some(path) = query.path.as_deref().filter(|v| !v.trim().is_empty()) {
+        let executable = path
+            .split('|')
+            .find_map(|part| part.trim().strip_prefix("exe=").map(str::trim))
+            .unwrap_or(path.trim());
+        let exists = std::path::Path::new(executable).exists();
+        health_info["executable_path"] = serde_json::json!(executable);
+        health_info["executable_exists"] = serde_json::json!(exists);
+    }
+
     let is_running = health_info["is_running"].as_bool().unwrap_or(false);
     let is_active = health_info["is_active"].as_bool().unwrap_or(false);
+    let mut issues = Vec::new();
+    if !is_active {
+        issues.push("systemd 未处于 active 状态".to_string());
+    }
+    if !is_running {
+        issues.push("未发现关联运行进程".to_string());
+    }
+    if health_info["listening_ports"]
+        .as_array()
+        .map(|v| v.is_empty())
+        .unwrap_or(true)
+    {
+        issues.push("未发现关联监听端口".to_string());
+    }
+    if let Ok(output) = std::process::Command::new("journalctl")
+        .args([
+            "-u",
+            &unit_name,
+            "-n",
+            "80",
+            "--no-pager",
+            "-p",
+            "warning..alert",
+        ])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let log_issues: Vec<String> = text
+            .lines()
+            .filter(|line| {
+                let lower = line.to_lowercase();
+                lower.contains("error")
+                    || lower.contains("exception")
+                    || lower.contains("failed")
+                    || lower.contains("panic")
+                    || lower.contains("fatal")
+                    || lower.contains("oom")
+                    || lower.contains("timeout")
+            })
+            .take(8)
+            .map(|line| line.to_string())
+            .collect();
+        if !log_issues.is_empty() {
+            issues.push(format!("最近日志存在 {} 条异常关键字", log_issues.len()));
+        }
+        health_info["recent_log_issues"] = serde_json::json!(log_issues);
+    }
+    health_info["issues"] = serde_json::json!(issues);
+    health_info["recommendations"] = serde_json::json!([
+        format!("systemctl status {}", unit_name),
+        format!("journalctl -u {} -n 200 --no-pager", unit_name),
+        format!(
+            "ss -tulnp | grep -E '{}|{}'",
+            safe_name,
+            health_info["pids"]
+                .as_array()
+                .map(|pids| pids
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|"))
+                .unwrap_or_default()
+        ),
+    ]);
 
-    if is_running || is_active {
+    if issues.is_empty()
+        || (is_running && is_active && issues.len() == 1 && issues[0].contains("监听端口"))
+    {
         health_info["status"] = serde_json::json!("ok");
         health_info["message"] = serde_json::json!(format!("服务 {} 运行正常", safe_name));
     } else {
@@ -3897,6 +4761,68 @@ mod tests {
     }
 
     #[test]
+    fn custom_rule_payload_creates_enabled_rule() {
+        let existing = HashSet::new();
+        let payload = serde_json::json!({
+            "id": "custom.nginx.5xx",
+            "title": "Nginx 5xx 激增",
+            "level": "error",
+            "category": "nginx",
+            "target": "nginx",
+            "condition": "nginx, 5xx",
+            "summary": "Nginx 5xx 异常",
+            "suggestion": "查看 access/error 日志",
+            "commands": ["tail -n 200 /var/log/nginx/error.log"]
+        });
+        let (id, value) = normalize_custom_rule_payload(&payload, &existing).unwrap();
+        assert_eq!(id, "custom.nginx.5xx");
+        assert_eq!(value["custom"], true);
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["level"], "error");
+        assert_eq!(value["signals"][0], "nginx");
+        assert_eq!(value["signals"][1], "5xx");
+    }
+
+    #[test]
+    fn custom_rule_payload_rejects_duplicate_id() {
+        let mut existing = HashSet::new();
+        existing.insert("custom.nginx.5xx".to_string());
+        let payload = serde_json::json!({
+            "id": "custom.nginx.5xx",
+            "title": "重复规则"
+        });
+        assert!(normalize_custom_rule_payload(&payload, &existing).is_err());
+    }
+
+    #[test]
+    fn custom_rule_alert_matches_context_tokens() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "custom.redis.memory".to_string(),
+            serde_json::json!({
+                "custom": true,
+                "enabled": true,
+                "level": "warn",
+                "title": "Redis 内存异常",
+                "category": "redis",
+                "condition": "redis,memory",
+                "summary": "Redis memory 告警",
+                "suggestion": "检查 Redis maxmemory",
+                "commands": ["redis-cli info memory"]
+            }),
+        );
+        let alerts = vec![serde_json::json!({
+            "id": "redis-memory-source",
+            "title": "redis memory high",
+            "message": "redis memory usage is high"
+        })];
+        let matched = custom_rule_alerts(&overrides, &alerts, None);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0]["rule_id"], "custom.redis.memory");
+        assert_eq!(matched[0]["level"], "warn");
+    }
+
+    #[test]
     fn check_config_import_accepts_configs_object_and_skips_unknown() {
         let payload = serde_json::json!({
             "version": 1,
@@ -3909,17 +4835,132 @@ mod tests {
                     "host": "10.0.0.11",
                     "port": "6379"
                 },
+                "kafka": {
+                    "host": "10.0.0.12",
+                    "port": "9092",
+                    "config_path": "/etc/kafka/server.properties"
+                },
                 "unknown": {
                     "host": "127.0.0.1"
                 }
             }
         });
         let (imported, skipped, errors) = normalize_check_config_import_payload(&payload);
-        assert_eq!(imported.len(), 2);
-        assert_eq!(imported[0].0, "elasticsearch");
-        assert_eq!(imported[1].0, "redis");
+        assert_eq!(imported.len(), 3);
+        let ids: std::collections::HashSet<_> =
+            imported.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains("elasticsearch"));
+        assert!(ids.contains("redis"));
+        assert!(ids.contains("kafka"));
         assert_eq!(skipped, vec!["unknown".to_string()]);
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn run_request_params_are_preserved_for_history() {
+        let mut params = HashMap::new();
+        params.insert("target".to_string(), "nginx".to_string());
+        params.insert("dry_run".to_string(), "true".to_string());
+        let req = RunRequest {
+            params,
+            args: vec!["--verbose".to_string()],
+        };
+        let value = run_request_params_value(&req);
+        assert_eq!(value["target"], "nginx");
+        assert_eq!(value["dry_run"], "true");
+        assert_eq!(req.args, vec!["--verbose"]);
+    }
+
+    #[test]
+    fn update_script_request_accepts_param_definitions() {
+        let req: UpdateScriptRequest = serde_json::from_value(serde_json::json!({
+            "name": "参数脚本",
+            "params": [
+                {
+                    "name": "target",
+                    "description": "目标服务",
+                    "type": "string",
+                    "default": "nginx",
+                    "required": true
+                }
+            ]
+        }))
+        .expect("request should deserialize");
+        let params = req.params.expect("params provided");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "target");
+        assert_eq!(params[0].param_type, "string");
+        assert_eq!(params[0].default.as_deref(), Some("nginx"));
+        assert!(params[0].required);
+    }
+
+    #[test]
+    fn upload_param_json_parser_accepts_valid_array() {
+        let params = parse_script_params_json(
+            r#"[{"name":"target","description":"目标服务","type":"string","default":"nginx","required":true}]"#,
+        )
+        .expect("valid upload params should parse");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "target");
+        assert_eq!(params[0].param_type, "string");
+        assert_eq!(params[0].default.as_deref(), Some("nginx"));
+        assert!(params[0].required);
+        assert!(parse_script_params_json("").unwrap().is_empty());
+        assert!(parse_script_params_json(r#"{"name":"target"}"#).is_err());
+    }
+
+    #[test]
+    fn script_extension_parser_keeps_supported_executable_types_safe() {
+        assert_eq!(
+            script_extension_from_filename("repair.redis.py").unwrap(),
+            "py"
+        );
+        assert_eq!(
+            script_extension_from_filename("cleanup.PERL").unwrap(),
+            "perl"
+        );
+        assert_eq!(script_extension_from_filename("restart").unwrap(), "sh");
+        assert!(script_extension_from_filename("../bad.sh").is_err());
+        assert!(script_extension_from_filename("bad.txt").is_err());
+    }
+
+    #[test]
+    fn script_param_validation_rejects_invalid_definitions() {
+        let invalid_type = vec![ScriptParam {
+            name: "target".to_string(),
+            description: String::new(),
+            param_type: "object".to_string(),
+            default: None,
+            required: false,
+        }];
+        assert!(validate_script_params(&invalid_type).is_err());
+
+        let duplicate = vec![
+            ScriptParam {
+                name: "target".to_string(),
+                description: String::new(),
+                param_type: "string".to_string(),
+                default: None,
+                required: false,
+            },
+            ScriptParam {
+                name: "target".to_string(),
+                description: String::new(),
+                param_type: "boolean".to_string(),
+                default: Some("false".to_string()),
+                required: false,
+            },
+        ];
+        assert!(validate_script_params(&duplicate).is_err());
+
+        let valid = vec![ScriptParam {
+            name: "target_service".to_string(),
+            description: "目标服务".to_string(),
+            param_type: "string".to_string(),
+            default: Some("nginx".to_string()),
+            required: true,
+        }];
+        assert!(validate_script_params(&valid).is_ok());
     }
 
     #[test]

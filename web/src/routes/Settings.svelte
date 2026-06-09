@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
 
   let config = $state({
     port: 3399,
@@ -21,8 +22,10 @@
   let saving = $state(false);
   let saveMessage = $state('');
   let saveError = $state('');
+  let exportingConfigs = $state(false);
   let importingConfigs = $state(false);
   let configImportInput = $state(null);
+  let showResetConfirm = $state(false);
 
   async function load() {
     loading = true;
@@ -57,7 +60,11 @@
   }
 
   function resetToDefault() {
-    if (!confirm('确定恢复默认配置？')) return;
+    showResetConfirm = true;
+  }
+
+  function confirmResetToDefault() {
+    showResetConfirm = false;
     config = {
       port: 3399,
       bind: '0.0.0.0',
@@ -85,6 +92,33 @@
       URL.revokeObjectURL(a.href);
     } catch (e) {
       saveError = e.message;
+    }
+  }
+
+  async function exportCheckConfigs() {
+    exportingConfigs = true;
+    saveMessage = '';
+    saveError = '';
+    try {
+      const r = await fetch('/api/check-configs/export', { cache: 'no-store' });
+      if (!r.ok) throw new Error('连接配置导出失败: ' + r.status);
+      const data = await r.json();
+      const blob = new Blob([JSON.stringify(data, null, 2) + '\n'], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `dm-check-connection-configs-${ts}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      saveMessage = '连接配置已导出';
+      setTimeout(() => saveMessage = '', 3000);
+    } catch (e) {
+      saveError = e.message || '连接配置导出失败';
+    } finally {
+      exportingConfigs = false;
     }
   }
 
@@ -202,12 +236,15 @@
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-label">常规检查连接配置</span>
-              <span class="setting-desc">ES、Redis、MySQL、Nginx、Keepalived、Java 服务等检查会从数据库读取这些配置。路径字段可留空，系统会自动推断。</span>
+              <span class="setting-desc">ES、Redis、MySQL、Nginx、Keepalived、Java 服务等检查会从数据库读取这些配置。program_path 是程序可执行文件的完整路径，不是所在目录；config_path/log_path 是文件路径，data_path 是数据目录。路径字段可留空，系统会自动推断。</span>
             </div>
             <div class="inline-actions">
               <button class="reset-btn" onclick={downloadConfigTemplate}>下载模板</button>
+              <button class="reset-btn export-config-btn" onclick={exportCheckConfigs} disabled={exportingConfigs}>
+                {exportingConfigs ? '导出中...' : '导出连接配置'}
+              </button>
               <button class="save-btn secondary" onclick={() => configImportInput?.click()} disabled={importingConfigs}>
-                {importingConfigs ? '导入中...' : '导入 JSON'}
+                {importingConfigs ? '导入中...' : '导入连接配置'}
               </button>
               <input bind:this={configImportInput} class="hidden-file" type="file" accept="application/json,.json" onchange={importCheckConfigs} />
             </div>
@@ -240,9 +277,30 @@
           </div>
         </div>
       </div>
+
+      <div class="settings-section about-section">
+        <h3>关于 DM</h3>
+        <div class="about-grid">
+          <div><span>版本</span><strong>{config.about?.version || '0.1.0'}</strong></div>
+          <div><span>作者</span><strong>{config.about?.author || 'xuning'}</strong></div>
+          <div><span>邮箱</span><strong>{config.about?.email || 'gokeeps@qq.com'}</strong></div>
+          <div><span>许可证</span><strong>{config.about?.license || 'MIT'}</strong></div>
+        </div>
+      </div>
     </div>
   {/if}
 </div>
+
+<ConfirmDialog
+  open={showResetConfirm}
+  title="恢复默认配置"
+  message="确认恢复页面配置为默认值？此操作会覆盖当前未保存的表单内容。"
+  detail={`端口: 3399\n监听: 0.0.0.0\n主题: dark\n语言: zh`}
+  confirmText="恢复默认"
+  tone="safe"
+  onCancel={() => showResetConfirm = false}
+  onConfirm={confirmResetToDefault}
+/>
 
 <style>
   .settings-page { max-width: 1000px; margin: 0 auto; }
@@ -263,6 +321,11 @@
   .settings-grid { display: flex; flex-direction: column; gap: 20px; }
   .settings-section { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; padding: 20px; }
   .settings-section h3 { font-size: 15px; font-weight: 700; color: var(--text-primary); margin: 0 0 16px; }
+  .about-section { grid-column: 1 / -1; }
+  .about-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .about-grid div { min-width: 0; padding: 12px; border-radius: 10px; border: 1px solid var(--border-secondary); background: var(--bg-secondary); }
+  .about-grid span { display: block; margin-bottom: 6px; color: var(--text-tertiary); font-size: 12px; }
+  .about-grid strong { display: block; color: var(--text-primary); font-family: var(--theme-font-family-mono); overflow-wrap: anywhere; }
   .setting-rows { display: flex; flex-direction: column; gap: 14px; }
   .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
   .setting-info { flex: 1; }
@@ -286,5 +349,10 @@
     .header-right { flex-wrap: wrap; }
     .setting-row { flex-direction: column; align-items: stretch; gap: 8px; }
     .setting-input, .setting-select { width: 100%; }
+    .about-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 520px) {
+    .about-grid { grid-template-columns: 1fr; }
   }
 </style>

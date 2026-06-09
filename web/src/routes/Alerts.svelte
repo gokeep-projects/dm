@@ -1,5 +1,6 @@
 <script>
   import { onMount, tick } from 'svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
 
   let alerts = $state([]);
   let loading = $state(true);
@@ -19,6 +20,7 @@
   let typeOptionsList = $state(null);
   let typeSearchInput = $state(null);
   let clearing = $state(false);
+  let showClearConfirm = $state(false);
   let actionMessage = $state('');
   let actionError = $state('');
   let refreshTimer = null;
@@ -71,6 +73,11 @@
     return '信息';
   }
 
+  function compactCount(value) {
+    const n = Number(value || 0);
+    return n > 500 ? '500+' : String(n);
+  }
+
   function fieldValue(alert, key) {
     if (key === 'level') return alert.level === 'error' ? 0 : alert.level === 'warn' ? 1 : 2;
     if (key === 'active') return alert.active ? 0 : 1;
@@ -98,8 +105,17 @@
 
   async function clearAllAlerts() {
     if (clearing) return;
-    if (alerts.length > 0 && !confirm('确定清理所有系统告警吗？当前活跃和历史告警都会被删除，后台后续命中会重新生成。')) return;
+    if (alerts.length > 0) {
+      showClearConfirm = true;
+      return;
+    }
+    await confirmClearAllAlerts();
+  }
+
+  async function confirmClearAllAlerts() {
+    if (clearing) return;
     clearing = true;
+    showClearConfirm = false;
     actionMessage = '';
     actionError = '';
     try {
@@ -232,15 +248,15 @@
   <div class="alerts-header">
     <div class="header-stats">
       <button class="stat-card stat-total" class:active={!filterLevel} onclick={() => filterLevel = ''}>
-        <span class="stat-num">{alerts.length}</span>
+        <span class="stat-num">{compactCount(alerts.length)}</span>
         <span class="stat-label">总告警</span>
       </button>
       <button class="stat-card stat-error" class:active={filterLevel === 'error'} onclick={() => filterLevel = filterLevel === 'error' ? '' : 'error'}>
-        <span class="stat-num">{errorCount}</span>
+        <span class="stat-num">{compactCount(errorCount)}</span>
         <span class="stat-label">错误</span>
       </button>
       <button class="stat-card stat-warn" class:active={filterLevel === 'warn'} onclick={() => filterLevel = filterLevel === 'warn' ? '' : 'warn'}>
-        <span class="stat-num">{warnCount}</span>
+        <span class="stat-num">{compactCount(warnCount)}</span>
         <span class="stat-label">警告</span>
       </button>
       {#if summary}
@@ -252,7 +268,7 @@
       <div class="type-select inline-type-select">
         <button class="type-select-btn" class:active={!!filterType} onclick={toggleTypeSelect}>
           <span>{filterType ? typeLabel(filterType) : '全部类型'}</span>
-          <span class="type-select-count">{filterType ? alerts.filter(a => a.type === filterType).length : alerts.length}</span>
+          <span class="type-select-count">{compactCount(filterType ? alerts.filter(a => a.type === filterType).length : alerts.length)}</span>
           <span class="type-select-arrow">{showTypeSelect ? '↑' : '↓'}</span>
         </button>
         {#if showTypeSelect}
@@ -271,7 +287,7 @@
                 aria-selected={filterType === option.value}>
                 <span>{option.label}</span>
                 {#if option.detail}<small>{option.detail}</small>{/if}
-                <span>{option.count}</span>
+                <span>{compactCount(option.count)}</span>
               </button>
               {/each}
               {#if typeOptions.length === 0}
@@ -323,7 +339,7 @@
         <button onclick={() => changeSort('pid')}>PID{sortMark('pid')}</button>
         <button onclick={() => changeSort('log_path')}>日志路径{sortMark('log_path')}</button>
         <button onclick={() => changeSort('summary')}>告警概要{sortMark('summary')}</button>
-        <button onclick={() => changeSort('handling')}>处理意见{sortMark('handling')}</button>
+        <span class="head-static">详情</span>
       </div>
       {#each filtered as alert}
         <div class="alert-row-wrap" class:row-error={alert.level === 'error'} class:row-warn={alert.level === 'warn'}>
@@ -335,7 +351,9 @@
             <span class="pid-cell">{alert.pid || '-'}</span>
             <span class="path-cell" title={alert.log_path || ''}>{alert.log_path || '-'}</span>
             <span class="summary-cell" title={alert.summary || alert.message}>{alert.summary || alert.message}</span>
-            <span class="handling-cell" title={alert.handling || ''}>{alert.handling || '-'}</span>
+            <span class="detail-action-cell">
+              <span class="detail-open-btn">{selectedAlertId === alert.id ? '收起' : '详情'}</span>
+            </span>
           </button>
           {#if selectedAlertId === alert.id}
             <div class="row-details">
@@ -348,6 +366,12 @@
                 <div><span class="detail-label">出现次数</span><span class="detail-value">{alert.occurrence_count || 1}</span></div>
               </div>
               <div class="detail-message">{alert.message}</div>
+              {#if alert.handling}
+                <div class="detail-block">
+                  <div class="detail-block-title">处理意见</div>
+                  <div class="suggestion-line">{alert.handling}</div>
+                </div>
+              {/if}
               {#if alert.evidence?.length}
                 <div class="detail-block">
                   <div class="detail-block-title">异常详情 / 证据</div>
@@ -379,6 +403,17 @@
     </div>
   {/if}
 </div>
+
+<ConfirmDialog
+  open={showClearConfirm}
+  title="清理系统告警"
+  message="确认清理所有系统告警？当前活跃和历史告警都会被删除，后台后续命中会重新生成。"
+  detail={`当前列表: ${alerts.length} 条\n历史视图: ${showHistory ? '开启' : '关闭'}`}
+  confirmText="清理告警"
+  loading={clearing}
+  onCancel={() => showClearConfirm = false}
+  onConfirm={confirmClearAllAlerts}
+/>
 
 <style>
   .alerts-page { width: 100%; max-width: none; margin: 0; }
@@ -431,18 +466,19 @@
   .type-select-empty { padding: 10px; color: #64748b; font-size: 12px; text-align: center; }
   .scan-compact { margin-bottom: 10px; color: var(--text-tertiary); font-size: 12px; text-align: right; }
   .alerts-list { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 10px; overflow-x: auto; overflow-y: hidden; }
-  .alerts-table-head { display: grid; grid-template-columns: 132px 66px 132px 62px 150px minmax(190px, 1.35fr) minmax(180px, 0.95fr); gap: 8px; padding: 10px 12px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-primary); }
+  .alerts-table-head { display: grid; grid-template-columns: 132px 66px 132px 62px 150px minmax(360px, 1.8fr) 74px; gap: 8px; padding: 10px 12px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-primary); }
   .alerts-table-head,
   .alert-row { min-width: 980px; }
   .alerts-list.with-history .alerts-table-head,
-  .alerts-list.with-history .alert-row { grid-template-columns: 132px 66px 58px 132px 62px 150px minmax(190px, 1.35fr) minmax(180px, 0.95fr); min-width: 1040px; }
-  .alerts-table-head button { border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 700; text-align: left; cursor: pointer; padding: 0; }
+  .alerts-list.with-history .alert-row { grid-template-columns: 132px 66px 58px 132px 62px 150px minmax(360px, 1.8fr) 74px; min-width: 1120px; }
+  .alerts-table-head button, .head-static { border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 700; text-align: left; cursor: pointer; padding: 0; }
+  .head-static { cursor: default; text-align: center; }
   .alerts-table-head button:hover { color: var(--text-primary); }
   .alert-row-wrap { border-bottom: 1px solid var(--border-secondary); border-left: 4px solid transparent; transition: background .2s ease, border-color .2s ease, opacity .2s ease; }
   .alert-row-wrap:last-child { border-bottom: none; }
   .alert-row-wrap.row-error { border-left-color: #ef4444; }
   .alert-row-wrap.row-warn { border-left-color: #f59e0b; }
-  .alert-row { display: grid; grid-template-columns: 132px 66px 132px 62px 150px minmax(190px, 1.35fr) minmax(180px, 0.95fr); gap: 8px; align-items: center; width: 100%; padding: 11px 12px; border: none; background: transparent; color: inherit; text-align: left; cursor: pointer; transition: background .18s ease; }
+  .alert-row { display: grid; grid-template-columns: 132px 66px 132px 62px 150px minmax(360px, 1.8fr) 74px; gap: 8px; align-items: center; width: 100%; padding: 11px 12px; border: none; background: transparent; color: inherit; text-align: left; cursor: pointer; transition: background .18s ease; }
   .alert-row:hover { background: var(--bg-hover); }
   .level-pill { display: inline-flex; align-items: center; justify-content: center; width: fit-content; min-width: 48px; padding: 4px 8px; border-radius: 7px; font-size: 10px; font-weight: 800; font-family: var(--theme-font-family-mono); }
   .active-cell { width: fit-content; padding: 3px 7px; border-radius: 999px; color: #10b981; background: rgba(16, 185, 129, 0.08); font-size: 11px; font-weight: 700; }
@@ -450,7 +486,9 @@
   .target-cell { min-width: 0; color: var(--text-primary); font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .target-cell small { display: block; margin-top: 2px; color: var(--text-tertiary); font-size: 10px; font-weight: 500; }
   .pid-cell, .path-cell, .time-cell { min-width: 0; color: var(--text-secondary); font-size: 12px; font-family: var(--theme-font-family-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .summary-cell, .handling-cell { min-width: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .summary-cell { min-width: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail-action-cell { display: flex; justify-content: center; }
+  .detail-open-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 52px; height: 26px; padding: 0 9px; border-radius: 8px; border: 1px solid rgba(34,211,238,.24); background: rgba(34,211,238,.08); color: #67e8f9; font-size: 11px; font-weight: 800; }
   .row-details { padding: 12px 16px 16px; background: color-mix(in srgb, var(--bg-secondary) 70%, transparent); border-top: 1px solid var(--border-secondary); }
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 16px; margin-bottom: 10px; }
   .detail-grid > div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 8px; background: var(--bg-card); border: 1px solid var(--border-secondary); border-radius: 7px; }
@@ -477,7 +515,7 @@
     .search-input { width: 100%; }
     .alerts-table-head { display: none; }
     .alert-row { grid-template-columns: 68px 1fr; }
-    .pid-cell, .path-cell, .time-cell, .handling-cell { display: none; }
+    .pid-cell, .path-cell, .time-cell { display: none; }
     .summary-cell { grid-column: 2; white-space: normal; }
   }
 </style>

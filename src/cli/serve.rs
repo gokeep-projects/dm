@@ -3,7 +3,10 @@ use crate::config::Config;
 use crate::web;
 use anyhow::Result;
 use colored::*;
-use std::process::Stdio;
+use std::fs::OpenOptions;
+use std::process::{Command, Stdio};
+
+const DAEMON_CHILD_ENV: &str = "DM_SERVE_DAEMON_CHILD";
 
 fn fmt_bytes(b: u64) -> String {
     if b < 1024 {
@@ -18,7 +21,101 @@ fn fmt_bytes(b: u64) -> String {
     format!("{:.1} GB", b as f64 / 1073741824.0)
 }
 
-pub async fn execute(port: u16, bind: &str) -> Result<()> {
+pub async fn execute(port: u16, bind: &str, daemon: bool) -> Result<()> {
+    if daemon && !is_daemon_child() {
+        return start_daemon(port, bind);
+    }
+
+    run_server(port, bind, !is_daemon_child()).await
+}
+
+fn is_daemon_child() -> bool {
+    std::env::var_os(DAEMON_CHILD_ENV).is_some()
+}
+
+fn start_daemon(port: u16, bind: &str) -> Result<()> {
+    let config = Config::load();
+    crate::config::ensure_user_dirs(&config);
+    let addr = format!("{}:{}", bind, port);
+
+    if let Err(e) = std::net::TcpListener::bind(&addr) {
+        anyhow::bail!("端口 {} 已被占用或监听地址不可用: {}", port, e);
+    }
+
+    let log_path = config.log_dir.join(format!("dm-serve-{}.log", port));
+    let pid_path = config.log_dir.join(format!("dm-serve-{}.pid", port));
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let stderr = stdout.try_clone()?;
+    let exe = std::env::current_exe()?;
+
+    let mut command = Command::new(exe);
+    command
+        .arg("serve")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--bind")
+        .arg(bind)
+        .env(DAEMON_CHILD_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    detach_command(&mut command);
+
+    let child = command.spawn()?;
+    std::fs::write(&pid_path, format!("{}\n", child.id()))?;
+
+    print_heading("DM Web 服务", Some("后台模式"));
+    println!(
+        "  {} {}",
+        status_label("running"),
+        "服务已在后台启动".bright_white().bold()
+    );
+    println!();
+    println!(
+        "  {} {} {}",
+        "-".cyan(),
+        "Web 界面:".dimmed(),
+        format!("http://{}", addr).bright_white().bold()
+    );
+    println!(
+        "  {} {} {}",
+        "-".yellow(),
+        "PID 文件:".dimmed(),
+        pid_path.display().to_string().bright_white()
+    );
+    println!(
+        "  {} {} {}",
+        "-".magenta(),
+        "日志文件:".dimmed(),
+        log_path.display().to_string().bright_white()
+    );
+    println!();
+    print_hint(&format!("停止服务: kill {}", child.id()));
+    println!();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn detach_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_command(_command: &mut Command) {}
+
+async fn run_server(port: u16, bind: &str, open_browser: bool) -> Result<()> {
     let mut config = Config::load();
     config.port = port;
     let addr = format!("{}:{}", bind, port);
@@ -134,7 +231,9 @@ pub async fn execute(port: u16, bind: &str) -> Result<()> {
     println!();
     print_hint("按 Ctrl+C 停止服务");
     println!();
-    try_open_browser(port);
+    if open_browser {
+        try_open_browser(port);
+    }
 
     let app = web::build_router(config);
     axum::serve(listener, app).await?;

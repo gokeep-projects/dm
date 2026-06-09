@@ -99,6 +99,7 @@ pub mod container;
 pub mod elasticsearch;
 pub mod environment;
 pub mod java_service;
+pub mod kafka_check;
 pub mod keepalived_check;
 pub mod middleware;
 pub mod mysql_check;
@@ -145,6 +146,7 @@ pub fn run_check_without_enrich(id: &str) -> Option<CheckResult> {
         "nginx" => Some(nginx_check::check()),
         "keepalived" => Some(keepalived_check::check()),
         "mysql" => Some(mysql_check::check()),
+        "kafka" => Some(kafka_check::check()),
         "java-service" => Some(java_service::check()),
         "business-check" => Some(business_check::check()),
         _ => run_plugin(id),
@@ -229,6 +231,12 @@ pub fn list_checks() -> Vec<CheckInfo> {
             id: "mysql".into(),
             name: "MySQL 常规检查".into(),
             description: "连接/数据库统计/异常日志/备份恢复".into(),
+            category: "常规检查".into(),
+        },
+        CheckInfo {
+            id: "kafka".into(),
+            name: "Kafka 常规检查".into(),
+            description: "进程/端口/Topic/配置/日志/数据路径".into(),
             category: "常规检查".into(),
         },
         CheckInfo {

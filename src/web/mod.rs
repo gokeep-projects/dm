@@ -97,6 +97,7 @@ pub fn build_router(config: Config) -> Router {
         .route("/api/scripts/:id/source", get(api::get_script_source))
         .route("/api/scripts/stats/all", get(api::all_scripts_stats))
         .route("/api/scripts/upload", post(api::upload_script))
+        .route("/api/scripts/:id/file", put(api::replace_script_file))
         .route("/api/scripts/:id/stats", get(api::get_script_stats))
         .route("/api/scripts/:id/run", post(api::run_script))
         .route("/api/scripts/:id/duplicate", post(api::duplicate_script))
@@ -104,6 +105,7 @@ pub fn build_router(config: Config) -> Router {
         .route("/api/checks/export", get(api::export_checks))
         .route("/api/checks/:id", get(api::run_check))
         .route("/api/check-configs/import", post(api::import_check_configs))
+        .route("/api/check-configs/export", get(api::export_check_configs))
         .route(
             "/api/check-configs/template",
             get(api::check_config_template),
@@ -120,7 +122,9 @@ pub fn build_router(config: Config) -> Router {
         )
         .route("/api/system/info", get(api::system_info))
         .route("/api/system/processes", get(api::get_all_processes))
+        .route("/api/traffic/interfaces", get(api::traffic_interfaces))
         .route("/api/docs", get(api::list_docs).post(api::create_doc_api))
+        .route("/api/docs/import", post(api::import_doc_api))
         .route(
             "/api/docs/:id",
             get(api::get_doc_api)
@@ -138,6 +142,7 @@ pub fn build_router(config: Config) -> Router {
             "/api/maintenance",
             get(api::list_maintenance).post(api::create_maintenance),
         )
+        .route("/api/maintenance/import", post(api::import_maintenance_api))
         .route(
             "/api/maintenance/:id",
             get(api::get_maintenance)
@@ -158,12 +163,13 @@ pub fn build_router(config: Config) -> Router {
             "/api/alerts",
             get(api::get_alerts).delete(api::clear_alerts),
         )
-        .route("/api/rules", get(api::list_rules))
+        .route("/api/rules", get(api::list_rules).post(api::create_rule))
         .route("/api/rules/import", post(api::import_rules))
         .route("/api/rules/:id", put(api::update_rule))
         .route("/api/config", get(api::get_config).put(api::update_config))
         .route("/ws/dashboard", get(ws::ws_dashboard_handler))
         .route("/ws/exec/:id", get(ws::ws_handler))
+        .route("/ws/traffic", get(ws::ws_traffic_handler))
         .fallback(static_handler)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

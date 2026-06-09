@@ -42,12 +42,25 @@ pub fn check() -> CheckResult {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "未知".to_string());
     let user = std::env::var("USER").unwrap_or_else(|_| "未知".to_string());
     let home = std::env::var("HOME").unwrap_or_else(|_| "未知".to_string());
-    let path = std::env::var("PATH").unwrap_or_else(|_| "未知".to_string());
+    let path = std::env::var("PATH").unwrap_or_default();
+    let path_rows: Vec<Vec<String>> = path
+        .split(':')
+        .filter(|entry| !entry.trim().is_empty())
+        .enumerate()
+        .map(|(index, entry)| vec![(index + 1).to_string(), entry.to_string()])
+        .collect();
+    let mut env_rows: Vec<Vec<String>> = std::env::vars()
+        .filter(|(key, _)| key != "PATH")
+        .map(|(key, value)| vec![key, value])
+        .collect();
+    env_rows.sort_by(|a, b| a[0].cmp(&b[0]));
 
     sections.push(Section {
         title: "Shell 环境".to_string(),
         icon: Some("🐚".to_string()),
-        description: None,
+        description: Some(
+            "PATH 单独拆分为路径列表；其他环境变量默认折叠，按需展开查看。".to_string(),
+        ),
         items: vec![
             Item::Label {
                 key: "当前用户".to_string(),
@@ -64,10 +77,15 @@ pub fn check() -> CheckResult {
                 value: home,
                 status: None,
             },
-            Item::Label {
-                key: "PATH".to_string(),
-                value: path,
+            Item::Table {
+                headers: vec!["序号".to_string(), "PATH 路径".to_string()],
+                rows: path_rows,
                 status: None,
+            },
+            Item::Table {
+                headers: vec!["变量".to_string(), "值".to_string()],
+                rows: env_rows,
+                status: Some("collapsed".to_string()),
             },
         ],
     });

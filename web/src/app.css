@@ -75,6 +75,39 @@ body::after {
   z-index: 1;
 }
 
+.dashboard,
+.checks-page,
+.check-page,
+.service-page,
+.scripts-page,
+.script-detail-page,
+.alerts-page,
+.settings-page,
+.docs-page,
+.help-page,
+.knowledge-page,
+.maint-page,
+.rules-page,
+.import-report-page,
+.traffic-page {
+  width: 100%;
+  max-width: none !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  box-sizing: border-box;
+}
+
+@media (min-width: 1800px) {
+  body {
+    font-size: 15px;
+  }
+
+  .content-area {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+}
+
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
@@ -86,8 +119,79 @@ body::after {
 }
 ::-webkit-scrollbar-corner { background: transparent; }
 
+.table-scroll,
+.table-wrap,
+.item-table,
+.result-table {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  cursor: default;
+  user-select: auto;
+}
+
+.table-scroll.drag-scrolling,
+.table-wrap.drag-scrolling,
+.item-table.drag-scrolling,
+.result-table.drag-scrolling,
+.proc-table.drag-scrolling,
+.process-table.drag-scrolling {
+  cursor: default;
+  user-select: none;
+}
+
+.table-scroll table,
+.table-wrap table,
+.item-table table,
+.result-table table {
+  min-width: max-content;
+}
+
+table[data-sticky-action="true"] {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+table[data-sticky-action="true"] th:last-child,
+table[data-sticky-action="true"] td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 3;
+  background: var(--bg-card, #ffffff);
+  box-shadow: -1px 0 0 var(--border-primary, #d8e0ea), -12px 0 18px rgba(15, 23, 42, 0.06);
+}
+
+table[data-sticky-action="true"] th:last-child {
+  z-index: 5;
+  background: var(--bg-secondary, #eef2f6);
+}
+
 pre, code {
   font-family: var(--theme-font-family-mono);
+}
+
+a,
+button,
+select,
+summary,
+[role="button"],
+input[type="button"],
+input[type="submit"],
+input[type="file"]::file-selector-button {
+  cursor: default !important;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+[aria-disabled="true"] {
+  cursor: default !important;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  cursor: default !important;
 }
 
 @keyframes float {
@@ -166,4 +270,33 @@ button:focus-visible { outline-offset: 1px; }
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+*,
+*::before,
+*::after {
+  cursor: default !important;
+}
+
+html,
+body,
+body *,
+body *::before,
+body *::after,
+body a,
+body button,
+body select,
+body summary,
+body label,
+body [role="button"],
+body [tabindex],
+body input,
+body textarea,
+body [contenteditable="true"],
+body input[type="button"],
+body input[type="submit"],
+body input[type="file"]::file-selector-button,
+body .drag-scrolling,
+body .resizing-column {
+  cursor: default !important;
 }

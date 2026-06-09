@@ -7,12 +7,34 @@
   let selectedId = $state('');
   let search = $state('');
   let category = $state('');
+  let categorySearch = $state('');
+  let showCategoryMenu = $state(false);
   let message = $state('');
   let error = $state('');
   let importing = $state(false);
   let importInput = $state(null);
   let ruleList = $state(null);
   let ruleSearchInput = $state(null);
+  let categorySearchInput = $state(null);
+  let showCreateRule = $state(false);
+  let creatingRule = $state(false);
+  let newRule = $state(defaultNewRule());
+  let newRuleCommands = $state('');
+
+  function defaultNewRule() {
+    return {
+      id: '',
+      title: '',
+      level: 'warn',
+      category: '自定义规则',
+      target: 'system',
+      condition: '',
+      summary: '',
+      suggestion: '',
+      description: '',
+      enabled: true,
+    };
+  }
 
   async function load() {
     loading = true;
@@ -45,6 +67,10 @@
         summary: rule.summary || '',
         suggestion: rule.suggestion || '',
         commands: Array.isArray(rule.commands) ? rule.commands : commandText(rule).split('\n').map(v => v.trim()).filter(Boolean),
+        category: rule.category || '',
+        target: rule.target || '',
+        condition: rule.condition || '',
+        description: rule.description || '',
       };
       const r = await fetch('/api/rules/' + encodeURIComponent(rule.id), {
         method: 'PUT',
@@ -60,6 +86,35 @@
       error = e.message || String(e);
     }
     savingId = '';
+  }
+
+  async function createRule() {
+    creatingRule = true;
+    message = '';
+    error = '';
+    try {
+      const payload = {
+        ...newRule,
+        commands: newRuleCommands.split('\n').map(v => v.trim()).filter(Boolean),
+      };
+      const r = await fetch('/api/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.status === 'error') throw new Error(d.message || '新增规则失败，请检查 ID、标题和条件');
+      message = d.message || '自定义规则已新增并实时生效';
+      selectedId = d.rule_id || newRule.id;
+      showCreateRule = false;
+      newRule = defaultNewRule();
+      newRuleCommands = '';
+      window.dispatchEvent(new CustomEvent('dm-alerts-refresh'));
+      await load();
+    } catch (e) {
+      error = e.message || String(e);
+    }
+    creatingRule = false;
   }
 
   function ruleTemplate() {
@@ -144,7 +199,38 @@
     }
   }
 
+  function selectCategory(value) {
+    category = value;
+    showCategoryMenu = false;
+    categorySearch = '';
+  }
+
+  function toggleCategoryMenu(event) {
+    event.stopPropagation();
+    showCategoryMenu = !showCategoryMenu;
+    if (showCategoryMenu) {
+      requestAnimationFrame(() => categorySearchInput?.focus());
+    }
+  }
+
+  function closeCategoryMenu(event) {
+    if (!event.target.closest?.('.category-filter')) showCategoryMenu = false;
+  }
+
   let categories = $derived.by(() => [...new Set(rules.map(r => r.category).filter(Boolean))].sort());
+  let filteredCategories = $derived.by(() => {
+    const q = categorySearch.trim().toLowerCase();
+    if (!q) return categories;
+    return categories.filter(c => c.toLowerCase().includes(q));
+  });
+  let categoryCounts = $derived.by(() => {
+    const counts = {};
+    for (const rule of rules) {
+      if (!rule.category) continue;
+      counts[rule.category] = (counts[rule.category] || 0) + 1;
+    }
+    return counts;
+  });
   let filtered = $derived.by(() => {
     const q = search.trim().toLowerCase();
     return rules.filter(rule => {
@@ -163,7 +249,11 @@
     if (!filtered.some(rule => rule.id === selectedId)) selectedId = filtered[0].id;
   });
 
-  onMount(load);
+  onMount(() => {
+    load();
+    document.addEventListener('click', closeCategoryMenu);
+    return () => document.removeEventListener('click', closeCategoryMenu);
+  });
 </script>
 
 <div class="rules-page">
@@ -185,13 +275,37 @@
     <div class="search-wrap">
       <input bind:this={ruleSearchInput} bind:value={search} onkeydown={onSearchKeydown} placeholder="搜索规则 ID、标题、条件、建议，回车定位..." />
     </div>
-    <select bind:value={category}>
-      <option value="">全部分类</option>
-      {#each categories as c}
-        <option value={c}>{c}</option>
-      {/each}
-    </select>
+    <div class="category-filter">
+      <button class="category-trigger" onclick={toggleCategoryMenu}>
+        <span>{category || '全部分类'}</span>
+        <em>{filtered.length}/{rules.length}</em>
+        <b>{showCategoryMenu ? '↑' : '↓'}</b>
+      </button>
+      {#if showCategoryMenu}
+        <div class="category-menu" role="listbox" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => {
+          if (event.key === 'Escape') showCategoryMenu = false;
+        }}>
+          <input class="category-search" bind:this={categorySearchInput} bind:value={categorySearch} placeholder="搜索分类..." aria-label="搜索规则分类" onkeydown={(event) => {
+            if (event.key === 'Escape') showCategoryMenu = false;
+            if (event.key === 'Enter' && filteredCategories[0]) selectCategory(filteredCategories[0]);
+          }} />
+          <button class="category-option" class:active={!category} onclick={() => selectCategory('')}>
+            <span>全部分类</span>
+            <em>{rules.length}</em>
+          </button>
+          {#each filteredCategories as c}
+            <button class="category-option" class:active={category === c} onclick={() => selectCategory(c)}>
+              <span>{c}</span>
+              <em>{categoryCounts[c] || 0}</em>
+            </button>
+          {:else}
+            <div class="category-empty">没有匹配分类</div>
+          {/each}
+        </div>
+      {/if}
+    </div>
     <button onclick={locateFirstRule} disabled={!filtered.length}>定位</button>
+    <button class="create-trigger" onclick={() => showCreateRule = !showCreateRule}>{showCreateRule ? '收起新增' : '新增规则'}</button>
     <button onclick={load}>重新加载</button>
     <button onclick={downloadTemplate}>下载模板</button>
     <button onclick={() => importInput?.click()} disabled={importing}>{importing ? '导入中...' : '导入JSON'}</button>
@@ -200,6 +314,36 @@
 
   {#if message}<div class="notice ok">{message}</div>{/if}
   {#if error}<div class="notice error">{error}</div>{/if}
+  {#if showCreateRule}
+    <div class="create-rule-panel">
+      <div class="create-head">
+        <div>
+          <h3>新增自定义规则</h3>
+          <p>条件用逗号、换行或竖线分隔，所有关键词都命中当前检查/告警上下文时生成告警。</p>
+        </div>
+        <label class="switch compact-switch">
+          <input type="checkbox" bind:checked={newRule.enabled} />
+          <span>启用</span>
+        </label>
+      </div>
+      <div class="create-grid">
+        <label><span>规则 ID *</span><input bind:value={newRule.id} placeholder="custom.nginx.5xx" /></label>
+        <label><span>标题 *</span><input bind:value={newRule.title} placeholder="Nginx 5xx 激增" /></label>
+        <label><span>级别</span><select bind:value={newRule.level}><option value="warn">warn</option><option value="error">error</option><option value="info">info</option></select></label>
+        <label><span>分类</span><input bind:value={newRule.category} placeholder="nginx / java / redis" /></label>
+        <label><span>目标</span><input bind:value={newRule.target} placeholder="system / nginx / service-name" /></label>
+        <label><span>命中条件 *</span><input bind:value={newRule.condition} placeholder="nginx, 5xx, upstream" /></label>
+      </div>
+      <label class="block-field"><span>概要</span><textarea rows="2" bind:value={newRule.summary} placeholder="命中后展示的摘要"></textarea></label>
+      <label class="block-field"><span>处理建议</span><textarea rows="2" bind:value={newRule.suggestion} placeholder="命中后展示的处理建议"></textarea></label>
+      <label class="block-field"><span>建议命令，每行一条</span><textarea rows="3" bind:value={newRuleCommands} placeholder="tail -n 200 /var/log/nginx/error.log"></textarea></label>
+      <div class="editor-actions">
+        <button class="save-rule" onclick={createRule} disabled={creatingRule || !newRule.id.trim() || !newRule.title.trim()}>
+          {creatingRule ? '新增中...' : '新增并实时生效'}
+        </button>
+      </div>
+    </div>
+  {/if}
 
   {#if loading}
     <div class="loading"><div class="loader"></div><span>正在加载规则...</span></div>
@@ -245,15 +389,15 @@
             </label>
             <label>
               <span>分类</span>
-              <input value={selected.category || ''} readonly />
+              <input value={selected.category || ''} readonly={!selected.custom} oninput={(e) => updateSelected('category', e.currentTarget.value)} />
             </label>
             <label>
               <span>目标</span>
-              <input value={selected.target || ''} readonly />
+              <input value={selected.target || ''} readonly={!selected.custom} oninput={(e) => updateSelected('target', e.currentTarget.value)} />
             </label>
             <label>
               <span>条件</span>
-              <input value={selected.condition || ''} readonly />
+              <input value={selected.condition || ''} readonly={!selected.custom} oninput={(e) => updateSelected('condition', e.currentTarget.value)} />
             </label>
           </div>
 
@@ -335,17 +479,36 @@
   .hero-metrics div { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border-primary); background: var(--bg-secondary); }
   .hero-metrics span { color: var(--text-secondary); font-size: 10px; white-space: nowrap; }
   .hero-metrics strong { color: var(--text-primary); font-family: var(--theme-font-family-mono); font-size: 13px; line-height: 1; }
-  .rules-toolbar { display: flex; gap: 10px; margin: 10px 0; }
-  .rules-toolbar input, .rules-toolbar select, .rules-toolbar button { height: 36px; border-radius: 9px; border: 1px solid var(--border-primary); background: var(--bg-card); color: var(--text-primary); padding: 0 12px; outline: none; }
+  .rules-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+  .rules-toolbar input, .rules-toolbar button { height: 36px; border-radius: 9px; border: 1px solid var(--border-primary); background: var(--bg-card); color: var(--text-primary); padding: 0 12px; outline: none; }
   .rules-toolbar button { cursor: pointer; font-weight: 700; white-space: nowrap; }
   .rules-toolbar button:hover:not(:disabled) { border-color: var(--border-focus); color: var(--accent-primary); background: var(--accent-primary-light); }
   .rules-toolbar button:disabled { opacity: .58; cursor: not-allowed; }
+  .create-trigger { color: #051014 !important; border-color: rgba(103,232,249,.35) !important; background: linear-gradient(135deg, #67e8f9, #34d399) !important; }
   .hidden-file { display: none; }
-  .search-wrap { flex: 1; }
+  .search-wrap { flex: 1 1 520px; min-width: min(520px, 100%); }
   .search-wrap input { width: 100%; box-sizing: border-box; }
+  .category-filter { position: relative; flex: 0 0 260px; min-width: 220px; }
+  .category-trigger { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; text-align: left; }
+  .category-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .category-trigger em { color: var(--text-tertiary); font-family: var(--theme-font-family-mono); font-size: 11px; font-style: normal; }
+  .category-trigger b { color: var(--text-tertiary); font-size: 11px; }
+  .category-menu { position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 40; max-height: 320px; overflow: auto; padding: 8px; border-radius: 12px; border: 1px solid rgba(34,211,238,.24); background: var(--bg-card); box-shadow: 0 18px 46px rgba(0,0,0,.28); }
+  .category-search { width: 100%; margin-bottom: 7px; background: var(--bg-input) !important; }
+  .category-option { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 0 0 4px; border-color: transparent !important; background: transparent !important; text-align: left; }
+  .category-option:hover, .category-option.active { border-color: rgba(34,211,238,.24) !important; background: rgba(34,211,238,.08) !important; }
+  .category-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .category-option em { color: var(--text-tertiary); font-family: var(--theme-font-family-mono); font-size: 11px; font-style: normal; }
+  .category-empty { padding: 18px 10px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
   .notice { margin-bottom: 10px; padding: 10px 12px; border-radius: 9px; font-size: 13px; }
   .notice.ok { color: #34d399; background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.18); }
   .notice.error { color: #f87171; background: rgba(248,113,113,.08); border: 1px solid rgba(248,113,113,.18); }
+  .create-rule-panel { margin: 0 0 12px; padding: 13px; border-radius: 12px; border: 1px solid rgba(103,232,249,.24); background: radial-gradient(circle at top right, rgba(52,211,153,.12), transparent 34%), var(--bg-card); box-shadow: inset 0 0 32px rgba(34,211,238,.04); }
+  .create-head { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+  .create-head h3 { margin: 0; color: var(--text-primary); font-size: 15px; }
+  .create-head p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; }
+  .compact-switch { flex-shrink: 0; margin-top: 2px; }
+  .create-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
   .rules-layout { display: grid; grid-template-columns: minmax(320px, 38%) minmax(0, 1fr); gap: 12px; }
   .rule-list, .rule-editor { border: 1px solid var(--border-primary); border-radius: 12px; background: var(--bg-card); }
   .rule-list { max-height: calc(100vh - 205px); overflow: auto; padding: 8px; }
@@ -392,7 +555,10 @@
   @media (max-width: 900px) {
     .rules-hero, .rules-toolbar { flex-direction: column; }
     .rules-hero { align-items: stretch; }
+    .search-wrap, .category-filter { flex-basis: auto; width: 100%; min-width: 0; }
     .hero-metrics { justify-content: flex-start; }
+    .create-head { flex-direction: column; }
+    .create-grid { grid-template-columns: 1fr; }
     .rules-layout { grid-template-columns: 1fr; }
     .rule-intel { grid-template-columns: 1fr; }
   }

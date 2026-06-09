@@ -100,6 +100,7 @@ pub fn check() -> CheckResult {
             rows,
             "未发现匹配的 Java 服务",
         ),
+        java_runtime_section(),
     ];
     sections.extend(log_sections);
     sections.push(table_section(
@@ -123,6 +124,94 @@ pub fn check() -> CheckResult {
         status: status_from_bool(running),
         sections,
     }
+}
+
+fn java_runtime_section() -> Section {
+    let rows: Vec<Vec<String>> = process_snapshot()
+        .into_iter()
+        .filter(|proc_| is_java_process(&proc_.name, &proc_.cmd))
+        .map(|proc_| {
+            let thread_count = proc_.threads.parse::<u32>().unwrap_or(0);
+            let flags = java_runtime_flags(&proc_.cmd);
+            let status = if proc_.cpu_usage >= 90.0
+                || proc_.memory_mb >= 8192.0
+                || thread_count >= 800
+                || !java_has_heap_limit(&flags)
+            {
+                "warn"
+            } else {
+                "ok"
+            };
+            vec![
+                proc_.pid.to_string(),
+                proc_.name,
+                format!("{:.1}", proc_.cpu_usage),
+                format!("{:.1}", proc_.memory_mb),
+                proc_.threads,
+                status.to_string(),
+                flags,
+            ]
+        })
+        .collect();
+    if rows.is_empty() {
+        return Section {
+            title: "Java 运行时".to_string(),
+            icon: Some("JVM".to_string()),
+            description: Some("未检测到 Java 运行时进程，跳过 JVM 指标采集".to_string()),
+            items: vec![Item::Info {
+                text: "未发现 Java/Tomcat 进程".to_string(),
+            }],
+        };
+    }
+    Section {
+        title: "Java 运行时".to_string(),
+        icon: Some("JVM".to_string()),
+        description: Some(
+            "重点关注 CPU、RSS 内存、线程数和 JVM 参数，异常项会进入规则引擎".to_string(),
+        ),
+        items: vec![Item::Table {
+            headers: vec![
+                "PID".to_string(),
+                "进程".to_string(),
+                "CPU%".to_string(),
+                "内存MB".to_string(),
+                "线程数".to_string(),
+                "状态".to_string(),
+                "JVM/启动参数".to_string(),
+            ],
+            rows,
+            status: Some("warn".to_string()),
+        }],
+    }
+}
+
+fn java_runtime_flags(cmd: &str) -> String {
+    let flags: Vec<&str> = cmd
+        .split_whitespace()
+        .filter(|token| {
+            token.starts_with("-Xmx")
+                || token.starts_with("-Xms")
+                || token.starts_with("-XX:")
+                || token.starts_with("-Dspring.profiles.active")
+                || token.starts_with("-Dserver.port")
+                || token.ends_with(".jar")
+                || token.contains("/tomcat/")
+        })
+        .take(12)
+        .collect();
+    if flags.is_empty() {
+        "未识别到关键 JVM 参数".to_string()
+    } else {
+        truncate(&flags.join(" "), 260)
+    }
+}
+
+fn java_has_heap_limit(flags: &str) -> bool {
+    let lower = flags.to_lowercase();
+    lower.contains("-xmx")
+        || lower.contains("maxrampercentage")
+        || lower.contains("maxheapsize")
+        || lower.contains("initialrampercentage")
 }
 
 fn process_snapshot() -> Vec<ProcessSnapshot> {

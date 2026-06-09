@@ -97,6 +97,7 @@ jobs:
 
       - name: Install cargo-zigbuild
         if: matrix.builder == 'zig'
+        working-directory: /tmp
         run: |
           cargo install cargo-zigbuild --locked
 
@@ -106,6 +107,7 @@ jobs:
 
       - name: Install cross
         if: matrix.builder == 'cross'
+        working-directory: /tmp
         run: |
           cargo install cross --git https://github.com/cross-rs/cross --locked
 
@@ -113,8 +115,8 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           npm run build --prefix web
-          cargo fmt --check
-          cargo test --locked
+          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' fmt --check
+          cargo --config 'net.offline=false' --config 'source.crates-io.replace-with="crates-io"' test --locked
 
       - name: Build package
         env:

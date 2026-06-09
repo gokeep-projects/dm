@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
 
   let { detailId = null, detailType = null } = $props();
   let activeTab = $state('docs');
@@ -22,6 +23,8 @@
   let viewLoading = $state(false);
   let sortKey = $state('time');
   let sortDir = $state('desc');
+  let pendingDelete = $state(null);
+  let deleteLoading = $state(false);
 
   async function load() {
     loading = true;
@@ -150,16 +153,24 @@
   }
 
   async function deleteItem(id, type) {
-    if (!confirm('确定删除？')) return;
+    pendingDelete = { id, type };
+  }
+
+  async function confirmDeleteItem() {
+    const item = pendingDelete;
+    if (!item) return;
+    deleteLoading = true;
     try {
-      if (type === 'record') {
-        await fetch('/api/maintenance/' + id, { method: 'DELETE' });
+      if (item.type === 'record') {
+        await fetch('/api/maintenance/' + item.id, { method: 'DELETE' });
       } else {
-        await fetch('/api/docs/' + encodeURIComponent(id), { method: 'DELETE' });
+        await fetch('/api/docs/' + encodeURIComponent(item.id), { method: 'DELETE' });
       }
-      if (viewingItem?.id === id) closeView();
+      if (viewingItem?.id === item.id) closeView();
+      pendingDelete = null;
       load();
     } catch (e) { console.warn('删除失败:', e); }
+    deleteLoading = false;
   }
 
   function changeSort(key) {
@@ -470,6 +481,17 @@
     {/if}
   {/if}
 </div>
+
+<ConfirmDialog
+  open={Boolean(pendingDelete)}
+  title={pendingDelete?.type === 'record' ? '删除维护记录' : '删除维护文档'}
+  message="确认删除该条目？删除后列表和详情页都会同步移除。"
+  detail={pendingDelete ? `ID: ${pendingDelete.id}\n类型: ${pendingDelete.type === 'record' ? '维护记录' : '维护文档'}` : ''}
+  confirmText="确认删除"
+  loading={deleteLoading}
+  onCancel={() => pendingDelete = null}
+  onConfirm={confirmDeleteItem}
+/>
 
 <style>
   .knowledge-page { width: 100%; max-width: none; margin: 0; }

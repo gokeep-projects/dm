@@ -1,6 +1,5 @@
 use super::{CheckStatus, Item, Section};
 use crate::config::Config;
-use crate::db::Database;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -58,10 +57,9 @@ impl EndpointConfig {
 
 pub fn load_endpoint_config(check_id: &str) -> EndpointConfig {
     let cfg = Config::load();
-    crate::config::ensure_user_dirs(&cfg);
-    let db = Database::open(&crate::config::db_path(&cfg));
-    db.get_check_config(check_id)
-        .and_then(|record| serde_json::from_value(record.value).ok())
+    let db = crate::check_config_store::open_runtime_db(&cfg);
+    crate::check_config_store::load_config_value(&cfg, &db, check_id)
+        .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
 }
 
@@ -134,7 +132,12 @@ pub fn process_rows(patterns: &[&str]) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     for line in out.lines() {
         let lower = line.to_lowercase();
-        if !lower_patterns.iter().any(|p| lower.contains(p)) || lower.contains("grep ") {
+        if !lower_patterns.iter().any(|p| lower.contains(p))
+            || lower.contains("grep ")
+            || lower.contains(" rg ")
+            || lower.contains("/api/checks/")
+            || lower.contains("curl -")
+        {
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -271,6 +274,17 @@ pub fn log_section(title: &str, path: Option<PathBuf>, max_lines: usize) -> Sect
     }
 }
 
+pub fn unavailable_log_section(title: &str, program: &str) -> Section {
+    Section {
+        title: title.to_string(),
+        icon: Some("LOG".to_string()),
+        description: Some("未检测到程序安装或运行，跳过日志路径推断".to_string()),
+        items: vec![Item::Info {
+            text: format!("未检测到 {}，不展示关联日志路径推断项", program),
+        }],
+    }
+}
+
 pub fn config_preview_section(title: &str, path: Option<PathBuf>) -> Section {
     let mut items = Vec::new();
     if let Some(path) = path {
@@ -302,6 +316,17 @@ pub fn config_preview_section(title: &str, path: Option<PathBuf>) -> Section {
         icon: Some("CONF".to_string()),
         description: Some("配置内容默认截断展示，可在页面展开表格查看".to_string()),
         items,
+    }
+}
+
+pub fn unavailable_config_section(title: &str, program: &str) -> Section {
+    Section {
+        title: title.to_string(),
+        icon: Some("CONF".to_string()),
+        description: Some("未检测到程序安装或运行，跳过配置路径推断".to_string()),
+        items: vec![Item::Info {
+            text: format!("未检测到 {}，不展示关联配置路径推断项", program),
+        }],
     }
 }
 

@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
 
   let docs = $state([]);
   let loading = $state(true);
@@ -19,6 +20,12 @@
   let saveError = $state(null);
   let sortKey = $state('updated_at');
   let sortDir = $state('desc');
+  let pendingDeleteId = $state('');
+  let deleteLoading = $state(false);
+  let importInput = $state(null);
+  let importingDoc = $state(false);
+  let importMessage = $state('');
+  let importError = $state('');
 
   async function load() {
     loading = true;
@@ -53,12 +60,20 @@
   }
 
   async function deleteDoc(id) {
-    if (!confirm(`确定删除文档 "${id}"？`)) return;
+    pendingDeleteId = id;
+  }
+
+  async function confirmDeleteDoc() {
+    const id = pendingDeleteId;
+    if (!id) return;
+    deleteLoading = true;
     try {
       await fetch('/api/docs/' + encodeURIComponent(id), { method: 'DELETE' });
       if (viewingDoc?.meta?.id === id) viewingDoc = null;
+      pendingDeleteId = '';
       load();
     } catch (_) {}
+    deleteLoading = false;
   }
 
   function closeView() { viewingDoc = null; editing = false; editContent = ''; }
@@ -112,6 +127,30 @@
     saving = false;
   }
 
+  async function importDocFile(event) {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    importingDoc = true;
+    importMessage = '';
+    importError = '';
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const r = await fetch('/api/docs/import', { method: 'POST', body: form });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.status === 'error') throw new Error(d.message || '导入失败');
+      importMessage = d.message || '文档已导入';
+      await load();
+      if (d.doc?.id) await viewDoc(d.doc.id);
+    } catch (e) {
+      importError = e.message || '导入失败';
+    } finally {
+      importingDoc = false;
+      event.currentTarget.value = '';
+      setTimeout(() => { importMessage = ''; importError = ''; }, 3600);
+    }
+  }
+
   let filtered = $derived.by(() => {
     let result = docs;
     if (search.trim()) {
@@ -150,8 +189,14 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         新建文档
       </button>
+      <button class="create-btn import-btn" onclick={() => importInput?.click()} disabled={importingDoc}>
+        {importingDoc ? '解析中...' : '上传解析'}
+      </button>
+      <input bind:this={importInput} class="hidden-file" type="file" accept=".md,.txt,.json,text/markdown,text/plain,application/json" onchange={importDocFile} />
     </div>
   </div>
+  {#if importMessage}<div class="import-notice ok">{importMessage}</div>{/if}
+  {#if importError}<div class="import-notice error">{importError}</div>{/if}
 
   {#if showCreate}
     <div class="create-panel">
@@ -264,6 +309,17 @@
   {/if}
 </div>
 
+<ConfirmDialog
+  open={Boolean(pendingDeleteId)}
+  title="删除文档"
+  message={`确认删除文档「${pendingDeleteId}」？`}
+  detail={pendingDeleteId ? `文档 ID: ${pendingDeleteId}` : ''}
+  confirmText="删除文档"
+  loading={deleteLoading}
+  onCancel={() => pendingDeleteId = ''}
+  onConfirm={confirmDeleteDoc}
+/>
+
 <style>
   .docs-page { max-width: 1200px; margin: 0 auto; }
   .page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
@@ -280,6 +336,12 @@
   .search-input:focus { border-color: rgba(34, 211, 238, 0.3); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.08); }
   .create-btn { display: flex; align-items: center; gap: 6px; padding: 10px 18px; background: linear-gradient(135deg, rgba(34, 211, 238, 0.15), rgba(6, 182, 212, 0.15)); border: 1px solid rgba(34, 211, 238, 0.25); border-radius: 10px; color: #22d3ee; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
   .create-btn:hover { background: linear-gradient(135deg, #22d3ee, #0891b2); color: #fff; transform: translateY(-1px); box-shadow: 0 4px 14px rgba(34, 211, 238, 0.3); }
+  .create-btn:disabled { opacity: .55; cursor: wait; transform: none; }
+  .import-btn { border-color: rgba(52,211,153,.25); color: #34d399; background: rgba(52,211,153,.1); }
+  .hidden-file { display: none; }
+  .import-notice { margin: -8px 0 12px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-weight: 700; }
+  .import-notice.ok { color: #34d399; background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.18); }
+  .import-notice.error { color: #f87171; background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.18); }
 
   .create-panel { background: rgba(15, 17, 23, 0.7); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
   .create-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }

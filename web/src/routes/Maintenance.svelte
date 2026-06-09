@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
 
   let records = $state([]);
   let loading = $state(true);
@@ -21,6 +22,12 @@
   let newError = $state(null);
   let sortKey = $state('timestamp');
   let sortDir = $state('desc');
+  let pendingDeleteId = $state('');
+  let deleteLoading = $state(false);
+  let importInput = $state(null);
+  let importingRecord = $state(false);
+  let importMessage = $state('');
+  let importError = $state('');
 
   async function load() {
     loading = true;
@@ -123,14 +130,22 @@
   }
 
   async function deleteRecord(id) {
-    if (!confirm('确定删除这条维护记录？')) return;
+    pendingDeleteId = id;
+  }
+
+  async function confirmDeleteRecord() {
+    const id = pendingDeleteId;
+    if (!id) return;
+    deleteLoading = true;
     try {
       const r = await fetch('/api/maintenance/' + id, { method: 'DELETE' });
       if (r.ok) {
+        pendingDeleteId = '';
         if (editingId === id) closeEditor();
         load();
       }
     } catch (e) { console.warn('删除记录失败:', e); }
+    deleteLoading = false;
   }
 
   async function toggleComplete(record) {
@@ -145,6 +160,29 @@
       } catch (e) { console.warn('切换状态失败:', e); }
     } else {
       openEditor(record);
+    }
+  }
+
+  async function importMaintenanceFile(event) {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    importingRecord = true;
+    importMessage = '';
+    importError = '';
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const r = await fetch('/api/maintenance/import', { method: 'POST', body: form });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.status === 'error') throw new Error(d.message || '导入失败');
+      importMessage = d.message || '维护记录已导入';
+      await load();
+    } catch (e) {
+      importError = e.message || '导入失败';
+    } finally {
+      importingRecord = false;
+      event.currentTarget.value = '';
+      setTimeout(() => { importMessage = ''; importError = ''; }, 3600);
     }
   }
 
@@ -202,11 +240,17 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         新建记录
       </button>
+      <button class="create-btn import-btn" onclick={() => importInput?.click()} disabled={importingRecord}>
+        {importingRecord ? '解析中...' : '上传解析'}
+      </button>
+      <input bind:this={importInput} class="hidden-file" type="file" accept=".md,.txt,.json,text/markdown,text/plain,application/json" onchange={importMaintenanceFile} />
       <button class="action-btn" onclick={load}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
       </button>
     </div>
   </div>
+  {#if importMessage}<div class="import-notice ok">{importMessage}</div>{/if}
+  {#if importError}<div class="import-notice error">{importError}</div>{/if}
 
   {#if categories.length > 0}
     <div class="category-chips">
@@ -326,6 +370,17 @@
   {/if}
 </div>
 
+<ConfirmDialog
+  open={Boolean(pendingDeleteId)}
+  title="删除维护记录"
+  message="确认删除这条维护记录？删除后不会再出现在维护时间线中。"
+  detail={pendingDeleteId ? `记录 ID: ${pendingDeleteId}` : ''}
+  confirmText="删除记录"
+  loading={deleteLoading}
+  onCancel={() => pendingDeleteId = ''}
+  onConfirm={confirmDeleteRecord}
+/>
+
 <style>
   .maint-page { max-width: 1200px; margin: 0 auto; }
   .page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
@@ -345,7 +400,13 @@
   .search-clear { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #4b5563; cursor: pointer; font-size: 14px; }
   .create-btn, .action-btn { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 10px; color: #94a3b8; font-size: 14px; cursor: pointer; transition: all 0.2s; }
   .create-btn:hover { background: rgba(34, 211, 238, 0.1); color: #22d3ee; border-color: rgba(34, 211, 238, 0.2); }
+  .create-btn:disabled { opacity: .55; cursor: wait; }
+  .import-btn { color: #34d399; border-color: rgba(52,211,153,.22); background: rgba(52,211,153,.08); }
   .action-btn:hover { background: rgba(255, 255, 255, 0.06); }
+  .hidden-file { display: none; }
+  .import-notice { margin: -8px 0 14px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-weight: 700; }
+  .import-notice.ok { color: #34d399; background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.18); }
+  .import-notice.error { color: #f87171; background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.18); }
 
   .category-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
   .chip { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.06); background: rgba(15, 17, 23, 0.5); color: #6b7280; font-size: 14px; cursor: pointer; transition: all 0.2s; }

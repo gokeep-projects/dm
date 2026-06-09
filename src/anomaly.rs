@@ -1914,7 +1914,740 @@ pub fn evaluate_check_result(result: &CheckResult) -> Vec<AnomalyFinding> {
             }
         }
     }
+    findings.extend(evaluate_domain_check_result(result));
     findings
+}
+
+fn evaluate_domain_check_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    match result.id.as_str() {
+        "service-manage" => evaluate_service_manage_result(result),
+        "nginx" => evaluate_nginx_result(result),
+        "redis" => evaluate_redis_result(result),
+        "elasticsearch" => evaluate_es_result(result),
+        "keepalived" => evaluate_keepalived_result(result),
+        "kafka" => evaluate_kafka_result(result),
+        "java-service" => evaluate_java_service_result(result),
+        _ => Vec::new(),
+    }
+}
+
+fn label_value<'a>(result: &'a CheckResult, section_title: &str, key: &str) -> Option<&'a str> {
+    result
+        .sections
+        .iter()
+        .find(|s| s.title == section_title)
+        .and_then(|s| {
+            s.items.iter().find_map(|item| match item {
+                Item::Label { key: k, value, .. } if k == key => Some(value.as_str()),
+                _ => None,
+            })
+        })
+}
+
+fn first_table_rows<'a>(result: &'a CheckResult, section_title: &str) -> Vec<&'a Vec<String>> {
+    result
+        .sections
+        .iter()
+        .find(|s| s.title == section_title)
+        .and_then(|s| {
+            s.items.iter().find_map(|item| match item {
+                Item::Table { rows, .. } => Some(rows.iter().collect()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn evaluate_service_manage_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    for row in first_table_rows(result, "服务列表") {
+        if row.len() < 12 {
+            continue;
+        }
+        let pid = row[1].trim();
+        let name = row[2].trim();
+        let process = row[3].trim();
+        let path = row[4].trim();
+        let ports = row[5].trim();
+        let status = row[6].trim();
+        let cpu = row[7].trim();
+        let memory = row[8].trim();
+        let category = row[9].trim();
+        let unit_state = row[10].trim();
+        let log_anomaly = row[11].trim();
+        if !unit_state.contains("/active/")
+            && unit_state != "process-only"
+            && unit_state != "unknown"
+        {
+            findings.push(
+                AnomalyFinding::new(
+                    format!("service.systemctl.state.{}", name),
+                    "error",
+                    "服务管理",
+                    format!("服务 {} systemctl 状态异常", name),
+                    name.to_string(),
+                    format!("systemctl 状态为 {}", unit_state),
+                )
+                .evidence([
+                    format!("PID: {}", pid),
+                    format!("进程: {}", process),
+                    format!("状态: {}", status),
+                    format!("Systemd: {}", unit_state),
+                    format!("端口: {}", ports),
+                    format!("路径: {}", path),
+                ])
+                .suggestion("先查看 systemctl status 和 journalctl，确认是否为 failed、activating 卡住或反复重启。")
+                .commands([
+                    format!("systemctl status {}", name),
+                    format!("journalctl -u {} -n 160 --no-pager", name),
+                ]),
+            );
+        }
+        if log_anomaly != "-" && !log_anomaly.is_empty() {
+            findings.push(
+                AnomalyFinding::new(
+                    format!("service.systemctl.log_anomaly.{}", name),
+                    "error",
+                    "服务管理",
+                    format!("服务 {} 最近日志存在异常", name),
+                    name.to_string(),
+                    format!("最近 systemd 日志发现异常关键字: {}", log_anomaly),
+                )
+                .evidence([
+                    format!("PID: {}", pid),
+                    format!("进程: {}", process),
+                    format!("类型: {}", category),
+                    format!("CPU: {}", cpu),
+                    format!("内存: {}", memory),
+                    format!("日志摘要: {}", log_anomaly),
+                ])
+                .suggestion("保留现场日志上下文，确认异常是否持续发生；必要时结合服务健康、端口和最近变更定位。")
+                .commands([
+                    format!("journalctl -u {} -n 200 --no-pager -p warning..alert", name),
+                    format!("systemctl status {}", name),
+                ]),
+            );
+        }
+    }
+    findings
+}
+
+fn evaluate_nginx_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let running = label_value(result, "连接与程序信息", "运行状态").unwrap_or("");
+    if running.contains("未发现") {
+        findings.push(
+            AnomalyFinding::new(
+                "middleware.nginx.not_running",
+                "warn",
+                "Web网关",
+                "Nginx 未运行",
+                "nginx",
+                "未发现 Nginx master/worker 进程",
+            )
+            .evidence([format!("运行状态: {}", running)])
+            .suggestion("确认该机器是否应承载 Nginx；若应运行，先检查配置再启动服务。")
+            .commands(["systemctl status nginx".to_string(), "nginx -t".to_string()]),
+        );
+    }
+    let config_test = label_value(result, "连接与程序信息", "配置检测").unwrap_or("");
+    if !config_test.is_empty()
+        && !config_test.contains("successful")
+        && !config_test.contains("ok")
+        && !config_test.contains("未安装")
+    {
+        findings.push(
+            AnomalyFinding::new(
+                "middleware.nginx.config_invalid",
+                "error",
+                "Web网关",
+                "Nginx 配置检测失败",
+                "nginx.conf",
+                "nginx -t 未通过，重载或启动可能失败",
+            )
+            .evidence([crate::checks::common::truncate(config_test, 360)])
+            .suggestion("先修复 nginx -t 输出中的配置错误，再执行 reload/start。")
+            .commands([
+                "nginx -t".to_string(),
+                "journalctl -u nginx -n 80 --no-pager".to_string(),
+            ]),
+        );
+    }
+    findings
+}
+
+fn evaluate_redis_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let ping = label_value(result, "连接信息", "PING").unwrap_or("");
+    if ping.contains("无响应") {
+        findings.push(
+            AnomalyFinding::new(
+                "middleware.redis.ping_failed",
+                "warn",
+                "中间件",
+                "Redis PING 无响应",
+                label_value(result, "连接信息", "地址").unwrap_or("redis"),
+                "Redis 无法响应 PING，可能未运行、认证错误或端口不可达",
+            )
+            .evidence([format!("PING: {}", ping)])
+            .suggestion("确认 Redis 进程、监听端口和密码配置，避免误判为业务缓存故障。")
+            .commands([
+                "systemctl status redis redis-server".to_string(),
+                "redis-cli ping".to_string(),
+            ]),
+        );
+    }
+    for row in first_table_rows(result, "运行状态") {
+        if row.len() >= 2 {
+            let key = &row[0];
+            let value = &row[1];
+            if (key == "blocked_clients" && value.parse::<u64>().unwrap_or(0) > 0)
+                || (key == "rdb_last_bgsave_status" && value != "ok" && value != "-")
+                || (key == "aof_last_write_status" && value != "ok" && value != "-")
+            {
+                findings.push(
+                    AnomalyFinding::new(
+                        format!("middleware.redis.{}", key),
+                        "warn",
+                        "中间件",
+                        format!("Redis {} 异常", key),
+                        key.clone(),
+                        format!("{} = {}", key, value),
+                    )
+                    .evidence([format!("{}: {}", key, value)])
+                    .suggestion("检查 Redis INFO、慢日志、持久化日志和磁盘空间。")
+                    .commands([
+                        "redis-cli info".to_string(),
+                        "redis-cli slowlog get 10".to_string(),
+                    ]),
+                );
+            }
+        }
+    }
+    findings
+}
+
+fn evaluate_es_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let state = label_value(result, "集群健康", "集群状态").unwrap_or("");
+    if state == "yellow" || state == "red" || state == "unknown" {
+        findings.push(
+            AnomalyFinding::new(
+                "middleware.elasticsearch.cluster_health",
+                if state == "red" { "error" } else { "warn" },
+                "中间件",
+                "Elasticsearch 集群健康异常",
+                "cluster",
+                format!("集群状态: {}", state),
+            )
+            .evidence([
+                format!("集群状态: {}", state),
+                format!(
+                    "未分配分片: {}",
+                    label_value(result, "集群健康", "未分配分片").unwrap_or("-")
+                ),
+            ])
+            .suggestion("优先处理 red/yellow、未分配分片和磁盘水位，再观察 shard recovery。")
+            .commands([
+                "curl -s localhost:9200/_cluster/health?pretty".to_string(),
+                "curl -s localhost:9200/_cat/shards?v".to_string(),
+            ]),
+        );
+    }
+    findings
+}
+
+fn evaluate_keepalived_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let running = label_value(result, "运行状态", "运行状态").unwrap_or("");
+    if running.contains("未发现") {
+        findings.push(
+            AnomalyFinding::new(
+                "middleware.keepalived.not_running",
+                "warn",
+                "中间件",
+                "Keepalived 未运行",
+                "keepalived",
+                "未发现 Keepalived 进程，VIP 漂移能力可能失效",
+            )
+            .evidence([format!("运行状态: {}", running)])
+            .suggestion("确认该节点是否应参与 VRRP；若应参与，检查配置、网卡、VRID 和日志。")
+            .commands([
+                "systemctl status keepalived".to_string(),
+                "ip addr show".to_string(),
+                "journalctl -u keepalived -n 100 --no-pager".to_string(),
+            ]),
+        );
+    }
+    findings
+}
+
+fn evaluate_kafka_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let running = label_value(result, "运行与连接", "运行状态").unwrap_or("");
+    if running.contains("未发现") || running.contains("未安装") {
+        findings.push(
+            AnomalyFinding::new(
+                "middleware.kafka.not_running",
+                "warn",
+                "中间件",
+                "Kafka 未运行",
+                "kafka",
+                "未发现 Kafka broker 进程或常见监听端口",
+            )
+            .evidence([format!("运行状态: {}", running)])
+            .suggestion("确认该机器是否应承载 Kafka；若应运行，检查 systemd、server.properties、磁盘和 broker 日志。")
+            .commands([
+                "systemctl status kafka".to_string(),
+                "ss -ltnp | grep -E ':9092|:9093'".to_string(),
+            ]),
+        );
+    }
+    findings
+}
+
+fn evaluate_java_service_result(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let matched = label_value(result, "匹配配置", "匹配结果").unwrap_or("");
+    if matched.contains("未发现") {
+        findings.push(
+            AnomalyFinding::new(
+                "java.service.not_found",
+                "warn",
+                "Java服务",
+                "未发现匹配 Java 服务",
+                "java-service",
+                "未发现符合服务前缀或 Java/Tomcat 特征的进程",
+            )
+            .evidence([format!("匹配结果: {}", matched)])
+            .suggestion("确认服务前缀配置是否过窄，或目标 Java/Tomcat 服务是否已启动。")
+            .commands(["ps -eo pid,comm,args | grep -E 'java|tomcat|catalina'".to_string()]),
+        );
+    }
+    for row in first_table_rows(result, "Java 服务列表") {
+        if row.len() < 7 {
+            continue;
+        }
+        let pid = row[0].trim();
+        let name = row[1].trim();
+        let ports = row[5].trim();
+        let cmd = row[6].trim();
+        let lower_cmd = cmd.to_lowercase();
+        let likely_server = lower_cmd.contains("tomcat")
+            || lower_cmd.contains("catalina")
+            || lower_cmd.contains("spring")
+            || lower_cmd.contains("-dserver.port")
+            || lower_cmd.contains(".jar");
+        if likely_server
+            && (ports.is_empty()
+                || ports == "-"
+                || ports.contains("未发现")
+                || ports.contains("无监听"))
+        {
+            findings.push(
+                AnomalyFinding::new(
+                    format!("java.runtime.no_port.{}", pid),
+                    "error",
+                    "Java服务",
+                    format!("Java 服务 {} 未监听端口", name),
+                    format!("pid:{}", pid),
+                    "Java/Tomcat 进程存在，但未发现关联监听端口",
+                )
+                .evidence([
+                    format!("PID: {}", pid),
+                    format!("进程: {}", name),
+                    format!("监听端口: {}", if ports.is_empty() { "-" } else { ports }),
+                    format!("命令: {}", cmd),
+                ])
+                .suggestion(
+                    "确认应用是否启动完成、server.port/AJP 配置是否正确、端口是否绑定到预期地址。",
+                )
+                .commands([
+                    format!("ss -ltnp | grep {}", pid),
+                    format!(
+                        "jcmd {} VM.system_properties | grep -E 'server.port|catalina|ajp'",
+                        pid
+                    ),
+                    format!("tail -n 200 <{}-app.log>", name),
+                ]),
+            );
+        }
+    }
+    for row in first_table_rows(result, "Java 运行时") {
+        if row.len() < 7 {
+            continue;
+        }
+        let pid = &row[0];
+        let name = &row[1];
+        let cpu = row[2].parse::<f64>().unwrap_or(0.0);
+        let memory = row[3].parse::<f64>().unwrap_or(0.0);
+        let threads = row[4].parse::<u64>().unwrap_or(0);
+        let flags = &row[6];
+        let has_heap_limit = java_has_heap_limit(flags);
+        if cpu >= 85.0 || memory >= 4096.0 || threads >= 800 {
+            findings.push(
+                AnomalyFinding::new(
+                    format!("java.runtime.{}", pid),
+                    "warn",
+                    "Java服务",
+                    format!("Java 服务 {} 运行时压力偏高", name),
+                    format!("pid:{}", pid),
+                    format!("CPU {:.1}%，内存 {:.1}MB，线程 {}", cpu, memory, threads),
+                )
+                .evidence([
+                    format!("PID: {}", pid),
+                    format!("进程: {}", name),
+                    format!("CPU: {:.1}%", cpu),
+                    format!("内存: {:.1}MB", memory),
+                    format!("线程数: {}", threads),
+                    format!("参数: {}", flags),
+                ])
+                .suggestion(
+                    "抓取线程栈和 GC/堆信息，结合业务日志判断高 CPU、线程堆积或内存增长来源。",
+                )
+                .commands([
+                    format!("jcmd {} Thread.print | head -200", pid),
+                    format!("jcmd {} GC.heap_info", pid),
+                    format!("top -Hp {}", pid),
+                ]),
+            );
+        }
+        if cpu >= 90.0 {
+            findings.push(java_runtime_metric_finding(
+                pid,
+                name,
+                "cpu_high",
+                "error",
+                "CPU 持续高位",
+                format!("CPU {:.1}% 已超过 90%", cpu),
+                vec![
+                    format!("top -Hp {}", pid),
+                    format!("jcmd {} Thread.print | head -240", pid),
+                    format!("pidstat -t -p {} 1 5", pid),
+                ],
+            ));
+        } else if cpu >= 70.0 {
+            findings.push(java_runtime_metric_finding(
+                pid,
+                name,
+                "cpu_busy",
+                "warn",
+                "CPU 使用率偏高",
+                format!("CPU {:.1}% 已超过 70%", cpu),
+                vec![
+                    format!("top -Hp {}", pid),
+                    format!("jcmd {} Thread.print | head -200", pid),
+                ],
+            ));
+        }
+        if memory >= 8192.0 {
+            findings.push(java_runtime_metric_finding(
+                pid,
+                name,
+                "rss_critical",
+                "error",
+                "RSS 内存异常偏高",
+                format!("RSS 内存 {:.1}MB 已超过 8192MB", memory),
+                vec![
+                    format!("jcmd {} GC.heap_info", pid),
+                    format!("jcmd {} VM.native_memory summary", pid),
+                    format!("jmap -histo:live {} | head -80", pid),
+                ],
+            ));
+        } else if memory >= 4096.0 {
+            findings.push(java_runtime_metric_finding(
+                pid,
+                name,
+                "rss_high",
+                "warn",
+                "RSS 内存偏高",
+                format!("RSS 内存 {:.1}MB 已超过 4096MB", memory),
+                vec![
+                    format!("jcmd {} GC.heap_info", pid),
+                    format!("jmap -histo:live {} | head -60", pid),
+                ],
+            ));
+        }
+        if threads >= 800 {
+            findings.push(java_runtime_metric_finding(
+                pid,
+                name,
+                "threads_critical",
+                "error",
+                "线程数异常偏高",
+                format!("线程数 {} 已超过 800", threads),
+                vec![
+                    format!("jcmd {} Thread.print | head -260", pid),
+                    format!("ps -eLf | awk '$2=={}{{print}}' | wc -l", pid),
+                ],
+            ));
+        } else if threads >= 400 {
+            findings.push(java_runtime_metric_finding(
+                pid,
+                name,
+                "threads_high",
+                "warn",
+                "线程数偏高",
+                format!("线程数 {} 已超过 400", threads),
+                vec![
+                    format!("jcmd {} Thread.print | head -220", pid),
+                    format!("ss -antp | grep {}", pid),
+                ],
+            ));
+        }
+        if !has_heap_limit {
+            findings.push(
+                AnomalyFinding::new(
+                    format!("java.runtime.heap_unbounded.{}", pid),
+                    "warn",
+                    "Java服务",
+                    format!("Java 服务 {} 未识别到堆上限", name),
+                    format!("pid:{}", pid),
+                    "启动参数未发现 -Xmx、MaxRAMPercentage 或 MaxHeapSize",
+                )
+                .evidence([
+                    format!("PID: {}", pid),
+                    format!("进程: {}", name),
+                    format!("内存: {:.1}MB", memory),
+                    format!("参数: {}", flags),
+                ])
+                .suggestion("为 Java 服务显式配置堆上限，并结合容器/主机内存预留 metaspace、直接内存、线程栈和 page cache。")
+                .commands([
+                    format!("jcmd {} VM.flags", pid),
+                    format!("jcmd {} GC.heap_info", pid),
+                    "grep -R \"Xmx\\|MaxRAMPercentage\\|MaxHeapSize\" /etc/systemd /opt 2>/dev/null | head -80".to_string(),
+                ]),
+            );
+        }
+    }
+    findings.extend(evaluate_java_log_keywords(result));
+    findings
+}
+
+fn java_has_heap_limit(flags: &str) -> bool {
+    let lower = flags.to_lowercase();
+    lower.contains("-xmx")
+        || lower.contains("maxrampercentage")
+        || lower.contains("maxheapsize")
+        || lower.contains("initialrampercentage")
+}
+
+fn java_runtime_metric_finding(
+    pid: &str,
+    name: &str,
+    suffix: &str,
+    level: &str,
+    title: &str,
+    summary: String,
+    commands: Vec<String>,
+) -> AnomalyFinding {
+    AnomalyFinding::new(
+        format!("java.runtime.{}.{}", suffix, pid),
+        level,
+        "Java服务",
+        format!("Java 服务 {} {}", name, title),
+        format!("pid:{}", pid),
+        summary.clone(),
+    )
+    .evidence([
+        format!("PID: {}", pid),
+        format!("进程: {}", name),
+        format!("指标: {}", summary),
+    ])
+    .suggestion("结合线程栈、GC、堆对象和最近发布/流量变化定位根因，避免直接重启掩盖现场。")
+    .commands(commands)
+}
+
+fn evaluate_java_log_keywords(result: &CheckResult) -> Vec<AnomalyFinding> {
+    let mut findings = Vec::new();
+    let blob = check_result_text(result).to_lowercase();
+    let rules = [
+        (
+            "java.log.oom",
+            "error",
+            "Java OOM / 堆内存异常",
+            &["outofmemoryerror", "java heap space", "gc overhead limit exceeded"][..],
+            "日志出现 OOM 或堆空间不足关键词",
+            &[
+                "grep -RniE 'OutOfMemoryError|Java heap space|GC overhead' <log_dir> | tail -80",
+                "jcmd <pid> GC.heap_info",
+                "jmap -histo:live <pid> | head -80",
+            ][..],
+        ),
+        (
+            "java.log.metaspace",
+            "error",
+            "Java Metaspace 异常",
+            &["metaspace", "compressed class space"][..],
+            "日志出现 metaspace 或 class space 异常",
+            &[
+                "grep -RniE 'Metaspace|Compressed class space' <log_dir> | tail -80",
+                "jcmd <pid> VM.native_memory summary",
+            ][..],
+        ),
+        (
+            "java.log.native_thread",
+            "error",
+            "Java 原生线程创建失败",
+            &["unable to create new native thread"][..],
+            "日志出现 unable to create new native thread",
+            &[
+                "ulimit -a",
+                "ps -eLf | awk '$2==<pid>{print}' | wc -l",
+                "jcmd <pid> Thread.print | head -240",
+            ][..],
+        ),
+        (
+            "java.log.full_gc",
+            "warn",
+            "Java Full GC 频繁",
+            &["full gc", "allocation failure", "promotion failed"][..],
+            "日志出现 Full GC 或对象晋升失败关键词",
+            &[
+                "grep -RniE 'Full GC|allocation failure|promotion failed' <log_dir> | tail -80",
+                "jstat -gcutil <pid> 1000 10",
+            ][..],
+        ),
+        (
+            "java.log.deadlock",
+            "error",
+            "Java 死锁风险",
+            &["deadlock", "found one java-level deadlock"][..],
+            "日志或线程栈出现 deadlock 关键词",
+            &[
+                "jcmd <pid> Thread.print | grep -i deadlock -C8",
+                "grep -Rni deadlock <log_dir> | tail -80",
+            ][..],
+        ),
+        (
+            "java.log.connection_timeout",
+            "warn",
+            "Java 外部依赖超时",
+            &["read timed out", "connect timed out", "sockettimeoutexception"][..],
+            "日志出现连接或读取超时关键词",
+            &[
+                "grep -RniE 'read timed out|connect timed out|SocketTimeoutException' <log_dir> | tail -80",
+                "ss -antp | grep <pid> | head -80",
+            ][..],
+        ),
+        (
+            "java.log.connection_refused",
+            "error",
+            "Java 外部依赖连接拒绝",
+            &["connection refused", "connectexception", "econnrefused"][..],
+            "日志出现连接拒绝关键词",
+            &[
+                "grep -RniE 'Connection refused|ConnectException|ECONNREFUSED' <log_dir> | tail -80",
+                "ss -ltnp",
+            ][..],
+        ),
+    ];
+    for (rule_id, level, title, keywords, summary, commands) in rules {
+        if keywords.iter().any(|keyword| blob.contains(keyword)) {
+            findings.push(
+                AnomalyFinding::new(
+                    rule_id,
+                    level,
+                    "Java服务",
+                    title,
+                    "java-log",
+                    summary,
+                )
+                .evidence(keywords.iter().map(|keyword| format!("关键词: {}", keyword)))
+                .suggestion("优先截取首次异常上下文，关联发布时间、流量峰值、下游状态和 JVM 运行时指标。")
+                .commands(commands.iter().map(|cmd| (*cmd).to_string())),
+            );
+        }
+    }
+    findings
+}
+
+fn check_result_text(result: &CheckResult) -> String {
+    let mut values = vec![
+        result.id.clone(),
+        result.name.clone(),
+        result.description.clone(),
+        result.category.clone(),
+    ];
+    for section in &result.sections {
+        values.push(section.title.clone());
+        if let Some(description) = &section.description {
+            values.push(description.clone());
+        }
+        for item in &section.items {
+            match item {
+                Item::Label { key, value, status } => {
+                    values.push(key.clone());
+                    values.push(value.clone());
+                    if let Some(status) = status {
+                        values.push(status.clone());
+                    }
+                }
+                Item::Table {
+                    headers,
+                    rows,
+                    status,
+                } => {
+                    values.extend(headers.clone());
+                    values.extend(rows.iter().flat_map(|row| row.clone()));
+                    if let Some(status) = status {
+                        values.push(status.clone());
+                    }
+                }
+                Item::Bar {
+                    key,
+                    value,
+                    max,
+                    unit,
+                    status,
+                } => {
+                    values.push(key.clone());
+                    values.push(format!("{} {} {}", value, max, unit));
+                    if let Some(status) = status {
+                        values.push(status.clone());
+                    }
+                }
+                Item::Sparkline {
+                    key, unit, status, ..
+                } => {
+                    values.push(key.clone());
+                    values.push(unit.clone());
+                    if let Some(status) = status {
+                        values.push(status.clone());
+                    }
+                }
+                Item::Info { text }
+                | Item::Warning { text }
+                | Item::Error { text }
+                | Item::Success { text } => values.push(text.clone()),
+                Item::Finding {
+                    rule_id,
+                    level,
+                    category,
+                    title,
+                    target,
+                    summary,
+                    evidence,
+                    suggestion,
+                    commands,
+                } => {
+                    values.extend([
+                        rule_id.clone(),
+                        level.clone(),
+                        category.clone(),
+                        title.clone(),
+                        target.clone(),
+                        summary.clone(),
+                        suggestion.clone(),
+                    ]);
+                    values.extend(evidence.clone());
+                    values.extend(commands.clone());
+                }
+                Item::Divider => {}
+            }
+        }
+    }
+    values.join("\n")
 }
 
 pub fn enrich_check_result(result: &mut CheckResult) -> Vec<AnomalyFinding> {
@@ -2114,5 +2847,163 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(result.sections[0].title, "异常明细");
         assert!(matches!(result.sections[0].items[0], Item::Finding { .. }));
+    }
+
+    #[test]
+    fn middleware_specific_rules_create_actionable_nginx_findings() {
+        let result = CheckResult {
+            id: "nginx".to_string(),
+            name: "nginx".to_string(),
+            description: String::new(),
+            category: "test".to_string(),
+            version: "1".to_string(),
+            timestamp: String::new(),
+            duration_ms: 0,
+            status: CheckStatus::Warn,
+            sections: vec![Section {
+                title: "连接与程序信息".to_string(),
+                icon: None,
+                description: None,
+                items: vec![
+                    Item::Label {
+                        key: "运行状态".to_string(),
+                        value: "运行中".to_string(),
+                        status: Some("ok".to_string()),
+                    },
+                    Item::Label {
+                        key: "配置检测".to_string(),
+                        value: "nginx: [emerg] invalid number of arguments".to_string(),
+                        status: Some("warn".to_string()),
+                    },
+                ],
+            }],
+        };
+        let findings = evaluate_check_result(&result);
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "middleware.nginx.config_invalid"));
+        assert!(findings
+            .iter()
+            .any(|f| f.commands.iter().any(|c| c == "nginx -t")));
+    }
+
+    #[test]
+    fn java_runtime_rules_flag_hot_service() {
+        let result = CheckResult {
+            id: "java-service".to_string(),
+            name: "java".to_string(),
+            description: String::new(),
+            category: "test".to_string(),
+            version: "1".to_string(),
+            timestamp: String::new(),
+            duration_ms: 0,
+            status: CheckStatus::Warn,
+            sections: vec![Section {
+                title: "Java 运行时".to_string(),
+                icon: None,
+                description: None,
+                items: vec![Item::Table {
+                    headers: vec![
+                        "PID".to_string(),
+                        "进程".to_string(),
+                        "CPU%".to_string(),
+                        "内存MB".to_string(),
+                        "线程数".to_string(),
+                        "状态".to_string(),
+                        "JVM/启动参数".to_string(),
+                    ],
+                    rows: vec![vec![
+                        "42".to_string(),
+                        "order-service".to_string(),
+                        "91.0".to_string(),
+                        "5120.0".to_string(),
+                        "900".to_string(),
+                        "warn".to_string(),
+                        "-Xmx4g order-service.jar".to_string(),
+                    ]],
+                    status: Some("warn".to_string()),
+                }],
+            }],
+        };
+        let findings = evaluate_check_result(&result);
+        assert!(findings.iter().any(|f| f.rule_id == "java.runtime.42"));
+        assert!(findings
+            .iter()
+            .any(|f| f.commands.iter().any(|c| c.contains("Thread.print"))));
+    }
+
+    #[test]
+    fn java_runtime_rules_flag_heap_and_port_risks() {
+        let result = CheckResult {
+            id: "java-service".to_string(),
+            name: "java".to_string(),
+            description: String::new(),
+            category: "test".to_string(),
+            version: "1".to_string(),
+            timestamp: String::new(),
+            duration_ms: 0,
+            status: CheckStatus::Warn,
+            sections: vec![
+                Section {
+                    title: "Java 服务列表".to_string(),
+                    icon: None,
+                    description: None,
+                    items: vec![Item::Table {
+                        headers: vec![
+                            "PID".to_string(),
+                            "服务名".to_string(),
+                            "CPU%".to_string(),
+                            "内存MB".to_string(),
+                            "线程数".to_string(),
+                            "监听端口".to_string(),
+                            "命令".to_string(),
+                        ],
+                        rows: vec![vec![
+                            "42".to_string(),
+                            "tomcat".to_string(),
+                            "12.0".to_string(),
+                            "1024.0".to_string(),
+                            "180".to_string(),
+                            "".to_string(),
+                            "java -jar order-service.jar".to_string(),
+                        ]],
+                        status: Some("warn".to_string()),
+                    }],
+                },
+                Section {
+                    title: "Java 运行时".to_string(),
+                    icon: None,
+                    description: None,
+                    items: vec![Item::Table {
+                        headers: vec![
+                            "PID".to_string(),
+                            "进程".to_string(),
+                            "CPU%".to_string(),
+                            "内存MB".to_string(),
+                            "线程数".to_string(),
+                            "状态".to_string(),
+                            "JVM/启动参数".to_string(),
+                        ],
+                        rows: vec![vec![
+                            "42".to_string(),
+                            "tomcat".to_string(),
+                            "12.0".to_string(),
+                            "1024.0".to_string(),
+                            "180".to_string(),
+                            "warn".to_string(),
+                            "未识别到关键 JVM 参数".to_string(),
+                        ]],
+                        status: Some("warn".to_string()),
+                    }],
+                },
+            ],
+        };
+        let findings = evaluate_check_result(&result);
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "java.runtime.heap_unbounded.42"));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "java.runtime.no_port.42"));
     }
 }

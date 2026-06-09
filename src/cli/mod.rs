@@ -33,6 +33,9 @@ pub enum Commands {
         /// 监听地址
         #[arg(long, default_value = "0.0.0.0")]
         bind: String,
+        /// 后台启动服务
+        #[arg(short = 'd', long)]
+        daemon: bool,
     },
     /// 列出所有可用脚本
     List {
@@ -210,10 +213,49 @@ pub enum CheckConfigAction {
         /// JSON 配置文件路径
         file: std::path::PathBuf,
     },
+    /// 导出当前检查连接配置
+    Export {
+        /// 输出文件路径；不指定时输出到终端
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// 输出 JSON 配置模板
     Template {
         /// 输出文件路径；不指定时输出到终端
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn serve_short_daemon_flag_is_parsed() {
+        let cli = Cli::try_parse_from(["dm", "serve", "-d", "--port", "3401"]).unwrap();
+        match cli.command {
+            Some(Commands::Serve { port, bind, daemon }) => {
+                assert_eq!(port, 3401);
+                assert_eq!(bind, "0.0.0.0");
+                assert!(daemon);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_long_daemon_flag_is_parsed() {
+        let cli = Cli::try_parse_from(["dm", "serve", "--daemon", "--bind", "127.0.0.1"])
+            .unwrap();
+        match cli.command {
+            Some(Commands::Serve { port, bind, daemon }) => {
+                assert_eq!(port, 3399);
+                assert_eq!(bind, "127.0.0.1");
+                assert!(daemon);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
 }

@@ -8,6 +8,9 @@
 *.swo
 *~
 /.codegraph
+/.wolf
+/offline
 /output
 /.claude
+CLAUDE.md
 .DS_Store

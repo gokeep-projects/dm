@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::Path;
 
 pub struct Database {
@@ -15,6 +16,8 @@ pub struct ExecRecord {
     pub exit_code: Option<i32>,
     pub duration_ms: Option<u64>,
     pub output_lines: usize,
+    pub params: Value,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,7 +102,9 @@ impl Database {
                     timestamp TEXT NOT NULL,
                     exit_code INTEGER,
                     duration_ms INTEGER,
-                    output_lines INTEGER DEFAULT 0
+                    output_lines INTEGER DEFAULT 0,
+                    params_json TEXT NOT NULL DEFAULT '{}',
+                    args_json TEXT NOT NULL DEFAULT '[]'
                 );
                 CREATE INDEX IF NOT EXISTS idx_exec_script ON exec_history(script_id);
                 CREATE INDEX IF NOT EXISTS idx_exec_ts ON exec_history(timestamp);
@@ -132,6 +137,13 @@ impl Database {
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS service_log_cache (
+                    service_name TEXT PRIMARY KEY,
+                    log_path TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS metric_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -151,6 +163,16 @@ impl Database {
                     updated_at TEXT NOT NULL
                 );
             ");
+            let _ = conn.execute_batch(
+                "
+                ALTER TABLE exec_history ADD COLUMN params_json TEXT NOT NULL DEFAULT '{}';
+            ",
+            );
+            let _ = conn.execute_batch(
+                "
+                ALTER TABLE exec_history ADD COLUMN args_json TEXT NOT NULL DEFAULT '[]';
+            ",
+            );
             db.cleanup_metric_history();
         }
         db
@@ -161,19 +183,24 @@ impl Database {
         self.conn().is_ok()
     }
 
-    pub fn insert_exec(
+    pub fn insert_exec_with_inputs(
         &self,
         script_id: &str,
         script_name: &str,
         exit_code: Option<i32>,
         duration_ms: Option<u64>,
         output_lines: usize,
+        params_value: &Value,
+        args: &[String],
     ) {
         if let Ok(conn) = self.conn() {
             let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let params_json =
+                serde_json::to_string(params_value).unwrap_or_else(|_| "{}".to_string());
+            let args_json = serde_json::to_string(args).unwrap_or_else(|_| "[]".to_string());
             let _ = conn.execute(
-                "INSERT INTO exec_history (script_id, script_name, timestamp, exit_code, duration_ms, output_lines) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![script_id, script_name, ts, exit_code, duration_ms.map(|v| v as i64), output_lines as i64],
+                "INSERT INTO exec_history (script_id, script_name, timestamp, exit_code, duration_ms, output_lines, params_json, args_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![script_id, script_name, ts, exit_code, duration_ms.map(|v| v as i64), output_lines as i64, params_json, args_json],
             );
         }
     }
@@ -198,9 +225,9 @@ impl Database {
             return Vec::new();
         };
         let sql = if script_id.is_some() {
-            "SELECT id, script_id, script_name, timestamp, exit_code, duration_ms, output_lines FROM exec_history WHERE script_id = ?1 ORDER BY id DESC LIMIT ?2"
+            "SELECT id, script_id, script_name, timestamp, exit_code, duration_ms, output_lines, params_json, args_json FROM exec_history WHERE script_id = ?1 ORDER BY id DESC LIMIT ?2"
         } else {
-            "SELECT id, script_id, script_name, timestamp, exit_code, duration_ms, output_lines FROM exec_history ORDER BY id DESC LIMIT ?1"
+            "SELECT id, script_id, script_name, timestamp, exit_code, duration_ms, output_lines, params_json, args_json FROM exec_history ORDER BY id DESC LIMIT ?1"
         };
         let mut stmt = match conn.prepare(sql) {
             Ok(s) => s,
@@ -223,6 +250,10 @@ impl Database {
             exit_code: row.get(4)?,
             duration_ms: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
             output_lines: row.get::<_, i64>(6)? as usize,
+            params: serde_json::from_str::<Value>(&row.get::<_, String>(7)?)
+                .unwrap_or_else(|_| serde_json::json!({})),
+            args: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(8)?)
+                .unwrap_or_default(),
         })
     }
 
@@ -458,6 +489,29 @@ impl Database {
         .ok()
     }
 
+    pub fn list_check_configs(&self) -> Vec<CheckConfigRecord> {
+        let Ok(conn) = self.conn() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT check_id, value_json, updated_at FROM check_configs ORDER BY check_id ASC",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], |row| {
+            let value_json: String = row.get(1)?;
+            Ok(CheckConfigRecord {
+                check_id: row.get(0)?,
+                value: serde_json::from_str(&value_json).unwrap_or_else(|_| serde_json::json!({})),
+                updated_at: row.get(2)?,
+            })
+        })
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.ok())
+        .collect()
+    }
+
     pub fn save_check_config(&self, check_id: &str, value: &serde_json::Value) -> bool {
         let Ok(conn) = self.conn() else {
             return false;
@@ -471,6 +525,38 @@ impl Database {
                 value_json = excluded.value_json,
                 updated_at = excluded.updated_at",
             params![check_id, value_json, now],
+        )
+        .is_ok()
+    }
+
+    pub fn get_service_log_cache(&self, service_name: &str) -> Option<(String, String, String)> {
+        let Ok(conn) = self.conn() else {
+            return None;
+        };
+        conn.query_row(
+            "SELECT log_path, source, updated_at FROM service_log_cache WHERE service_name = ?1",
+            params![service_name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()
+    }
+
+    pub fn save_service_log_cache(&self, service_name: &str, log_path: &str, source: &str) -> bool {
+        if service_name.trim().is_empty() || log_path.trim().is_empty() {
+            return false;
+        }
+        let Ok(conn) = self.conn() else {
+            return false;
+        };
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        conn.execute(
+            "INSERT INTO service_log_cache (service_name, log_path, source, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(service_name) DO UPDATE SET
+                log_path = excluded.log_path,
+                source = excluded.source,
+                updated_at = excluded.updated_at",
+            params![service_name, log_path, source, now],
         )
         .is_ok()
     }
@@ -628,6 +714,42 @@ mod tests {
             .expect("config updated");
         assert_eq!(saved.value["host"], "10.0.0.8");
         assert_eq!(saved.value["log_path"], "/var/log/elasticsearch/es.log");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn exec_history_preserves_params_and_args() {
+        let path = temp_db_path("exec-inputs");
+        let db = Database::open(&path);
+        let params_value = serde_json::json!({
+            "target": "nginx",
+            "dry_run": "true"
+        });
+        let args = vec![
+            "--verbose".to_string(),
+            "/var/log/nginx/error.log".to_string(),
+        ];
+
+        db.insert_exec_with_inputs(
+            "restart-nginx",
+            "Restart Nginx",
+            None,
+            None,
+            0,
+            &params_value,
+            &args,
+        );
+        db.update_exec("restart-nginx", 0, 1234, 7);
+
+        let records = db.get_history(Some("restart-nginx"), 5);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].params["target"], "nginx");
+        assert_eq!(records[0].params["dry_run"], "true");
+        assert_eq!(records[0].args, args);
+        assert_eq!(records[0].exit_code, Some(0));
+        assert_eq!(records[0].duration_ms, Some(1234));
+        assert_eq!(records[0].output_lines, 7);
 
         let _ = std::fs::remove_file(path);
     }
