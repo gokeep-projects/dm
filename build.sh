@@ -2,7 +2,11 @@
 set -e
 echo "=== DM 构建脚本 ==="
 echo "[1/3] 构建前端..."
-cd web && npm install && npm run build && cd ..
+if [ -d offline/npm-cache ]; then
+  (cd web && npm ci --offline --cache ../offline/npm-cache --prefer-offline --no-audit --fund=false && npm run build)
+else
+  (cd web && npm ci --no-audit --fund=false && npm run build)
+fi
 echo "[2/3] 编译 Rust..."
 cargo build --release
 cp target/release/dm ./dm

@@ -264,7 +264,7 @@ sudo bash uninstall.sh
 ```
 EOF
 
-  (cd target/packages && zip -qr "$package_name.zip" "$package_name")
+  (cd target/packages && zip -9qr "$package_name.zip" "$package_name")
   rm -rf "$package_dir"
   echo "    [OK] target/packages/$package_name.zip"
 done

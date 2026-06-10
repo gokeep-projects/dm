@@ -1,8 +1,5 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Terminal } from '@xterm/xterm';
-  import { FitAddon } from '@xterm/addon-fit';
-  import '@xterm/xterm/css/xterm.css';
 
   let { id, autorun = false } = $props();
   let output = $state('');
@@ -14,6 +11,9 @@
   let termContainer = $state(null);
   let terminal = null;
   let fitAddon = null;
+  let TerminalCtor = null;
+  let FitAddonCtor = null;
+  let terminalLoading = false;
   let terminalWrap = $state(null);
   let isFullscreen = $state(false);
   let copyOk = $state(false);
@@ -487,9 +487,24 @@
     };
   }
 
-  function initTerminal() {
-    if (!termContainer || terminal) return;
-    terminal = new Terminal({
+  async function ensureTerminalLibs() {
+    if (TerminalCtor && FitAddonCtor) return;
+    const [terminalModule, fitModule] = await Promise.all([
+      import('@xterm/xterm'),
+      import('@xterm/addon-fit'),
+      import('@xterm/xterm/css/xterm.css'),
+    ]);
+    TerminalCtor = terminalModule.Terminal;
+    FitAddonCtor = fitModule.FitAddon;
+  }
+
+  async function initTerminal() {
+    if (!termContainer || terminal || terminalLoading) return;
+    terminalLoading = true;
+    try {
+      await ensureTerminalLibs();
+      if (!termContainer || terminal) return;
+      terminal = new TerminalCtor({
       cursorBlink: true,
       fontSize: 13,
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", "Microsoft YaHei", monospace',
@@ -521,18 +536,21 @@
       disableStdin: true,
       allowProposedApi: true,
       wraparound: false,
-    });
-    fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(termContainer);
-    fitAddon.fit();
-    writePrompt();
+      });
+      fitAddon = new FitAddonCtor();
+      terminal.loadAddon(fitAddon);
+      terminal.open(termContainer);
+      fitAddon.fit();
+      writePrompt();
 
-    const ro = new ResizeObserver(() => {
-      try { fitAddon.fit(); } catch (_) {}
-    });
-    ro.observe(termContainer);
-    termContainer._ro = ro;
+      const ro = new ResizeObserver(() => {
+        try { fitAddon.fit(); } catch (_) {}
+      });
+      ro.observe(termContainer);
+      termContainer._ro = ro;
+    } finally {
+      terminalLoading = false;
+    }
   }
 
   function writePrompt() {

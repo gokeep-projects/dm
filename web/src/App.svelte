@@ -4,19 +4,25 @@
   import './theme.css';
   import { t, getLang } from './i18n.js';
   import Dashboard from './routes/Dashboard.svelte';
-  import Scripts from './routes/Scripts.svelte';
-  import ScriptDetail from './routes/ScriptDetail.svelte';
-  import CheckList from './routes/CheckList.svelte';
-  import CheckResult from './routes/CheckResult.svelte';
-  import CheckImportReport from './routes/CheckImportReport.svelte';
-  import Docs from './routes/Docs.svelte';
-  import ServiceManage from './routes/ServiceManage.svelte';
-  import TrafficAnalysis from './routes/TrafficAnalysis.svelte';
-  import JavaAnalyzer from './routes/JavaAnalyzer.svelte';
-  import Help from './routes/Help.svelte';
-  import Alerts from './routes/Alerts.svelte';
-  import Settings from './routes/Settings.svelte';
-  import RuleEngine from './routes/RuleEngine.svelte';
+
+  const routeLoaders = {
+    dashboard: () => Promise.resolve({ default: Dashboard }),
+    checks: () => import('./routes/CheckList.svelte'),
+    check: () => import('./routes/CheckResult.svelte'),
+    'check-import': () => import('./routes/CheckImportReport.svelte'),
+    scripts: () => import('./routes/Scripts.svelte'),
+    script: () => import('./routes/ScriptDetail.svelte'),
+    knowledge: () => import('./routes/Docs.svelte'),
+    'maintenance-detail': () => import('./routes/Docs.svelte'),
+    'doc-detail': () => import('./routes/Docs.svelte'),
+    services: () => import('./routes/ServiceManage.svelte'),
+    traffic: () => import('./routes/TrafficAnalysis.svelte'),
+    'java-analyzer': () => import('./routes/JavaAnalyzer.svelte'),
+    alerts: () => import('./routes/Alerts.svelte'),
+    rules: () => import('./routes/RuleEngine.svelte'),
+    settings: () => import('./routes/Settings.svelte'),
+    help: () => import('./routes/Help.svelte'),
+  };
 
   let route = $state('dashboard');
   let sid = $state('');
@@ -36,6 +42,10 @@
   let showAlerts = $state(false);
   let alerts = $state([]);
   let alertsLoading = $state(false);
+  let ActiveRoute = $state(Dashboard);
+  let activeRouteKey = $state('dashboard');
+  let routeLoading = $state(false);
+  let routeLoadSeq = 0;
 
   function navigate(target) {
     location.hash = '#/' + target;
@@ -79,6 +89,35 @@
     const n = Number(value || 0);
     return n > 500 ? '500+' : String(n);
   }
+
+  function normalizedRouteKey(value) {
+    return routeLoaders[value] ? value : 'dashboard';
+  }
+
+  let activeRouteProps = $derived.by(() => {
+    if (activeRouteKey === 'script') return { id: sid, autorun };
+    if (activeRouteKey === 'check') return { id: sid };
+    if (activeRouteKey === 'doc-detail') return { detailId: sid };
+    return {};
+  });
+
+  $effect(() => {
+    const key = normalizedRouteKey(route);
+    const seq = ++routeLoadSeq;
+    routeLoading = key !== activeRouteKey;
+    routeLoaders[key]().then((module) => {
+      if (seq !== routeLoadSeq) return;
+      ActiveRoute = module.default;
+      activeRouteKey = key;
+      routeLoading = false;
+    }).catch((error) => {
+      console.error('加载页面失败:', error);
+      if (seq !== routeLoadSeq) return;
+      ActiveRoute = Dashboard;
+      activeRouteKey = 'dashboard';
+      routeLoading = false;
+    });
+  });
 
   async function openPalette() {
     if (paletteScripts.length === 0) {
@@ -361,41 +400,14 @@
     </header>
     <div class="content-area">
       {#if !transitioning}
-        <div class="route-shell" class:dashboard-route={route === 'dashboard'} in:fade={{ duration: 200, delay: 50 }}>
-          {#if route === 'dashboard'}
-            <Dashboard />
-          {:else if route === 'checks'}
-            <CheckList />
-          {:else if route === 'check'}
-            <CheckResult id={sid} />
-          {:else if route === 'check-import'}
-            <CheckImportReport />
-          {:else if route === 'scripts'}
-            <Scripts />
-          {:else if route === 'script'}
-            <ScriptDetail id={sid} {autorun} />
-          {:else if route === 'knowledge'}
-            <Docs />
-          {:else if route === 'maintenance-detail'}
-            <Docs />
-          {:else if route === 'doc-detail'}
-            <Docs detailId={sid} />
-          {:else if route === 'services'}
-            <ServiceManage />
-          {:else if route === 'traffic'}
-            <TrafficAnalysis />
-          {:else if route === 'java-analyzer'}
-            <JavaAnalyzer />
-          {:else if route === 'alerts'}
-            <Alerts />
-          {:else if route === 'rules'}
-            <RuleEngine />
-          {:else if route === 'settings'}
-            <Settings />
-          {:else if route === 'help'}
-            <Help />
+        <div class="route-shell" class:dashboard-route={normalizedRouteKey(route) === 'dashboard'} in:fade={{ duration: 200, delay: 50 }}>
+          {#if routeLoading}
+            <div class="route-loading" aria-live="polite">
+              <span></span>
+              <em>加载页面</em>
+            </div>
           {:else}
-            <Dashboard />
+            <ActiveRoute {...activeRouteProps} />
           {/if}
         </div>
       {/if}
@@ -865,6 +877,35 @@
   .route-shell.dashboard-route {
     height: 100%;
     overflow: hidden;
+  }
+
+  .route-loading {
+    min-height: min(360px, 70vh);
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: 10px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .route-loading span {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 2px solid rgba(34, 211, 238, 0.18);
+    border-top-color: #22d3ee;
+    box-shadow: 0 0 26px rgba(34, 211, 238, 0.18);
+    animation: routeSpin 0.8s linear infinite;
+  }
+
+  .route-loading em {
+    font-style: normal;
+  }
+
+  @keyframes routeSpin {
+    to { transform: rotate(360deg); }
   }
 
   @media (max-width: 820px) {
