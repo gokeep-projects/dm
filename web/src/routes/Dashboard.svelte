@@ -30,9 +30,10 @@
   let metricTimer = null;
   let clockTimer = null;
   let wsConnected = $state(false);
+  let wsDestroyed = false;
   let metricHistory = $state([]);
   let lastMetricSampleAt = 0;
-  let trendMinutes = $state(30);
+  let trendMinutes = $state(3);
   let trendHover = $state(null);
   let trendLoading = $state(false);
   let metricRequestSeq = 0;
@@ -130,6 +131,7 @@
   }
 
   function connectDashboardWs() {
+    if (wsDestroyed) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     dashboardWs = new WebSocket(`${proto}//${location.host}/ws/dashboard`);
     dashboardWs.onopen = () => {
@@ -150,7 +152,7 @@
     };
     dashboardWs.onclose = () => {
       wsConnected = false;
-      setTimeout(connectDashboardWs, 3000);
+      if (!wsDestroyed) setTimeout(connectDashboardWs, 3000);
     };
     dashboardWs.onerror = () => {
       wsConnected = false;
@@ -244,7 +246,13 @@
       const cutoff = rangeEnd - minutes * 60 * 1000;
       const points = (d.points || []).map(normalizeMetricPoint).filter(p => p.t >= cutoff);
       if (points.length === 0) {
-        if (metricHistory.length === 0 && sys) recordMetricSample(sys, true);
+        if (metricHistory.length === 0 && sys) {
+          recordMetricSample(sys, true);
+        }
+        // Backend may have just inserted a sample on empty DB; retry once after short delay
+        setTimeout(() => {
+          if (metricHistory.length === 0 && seq === metricRequestSeq) loadMetricHistory(showLoading);
+        }, 2000);
         return;
       }
       mergeMetricHistory(points, cutoff);
@@ -366,7 +374,7 @@
   }
 
   function selectedTrendLabel() {
-    return trendOptions.find(o => o.value === trendMinutes)?.label || '30分钟';
+    return trendOptions.find(o => o.value === trendMinutes)?.label || '3分钟';
   }
 
   function toggleTrendSeries(key) {
@@ -723,22 +731,24 @@
     else location.hash = '#/script/' + encodeURIComponent(targetId) + '/run';
   }
 
-  onMount(() => { 
-    loadMetricHistory();
-    loadData(); 
+  onMount(() => {
+    loadData();
     connectDashboardWs();
-    if (refreshInterval > 0) refreshTimer = setInterval(loadData, refreshInterval * 1000); 
-    metricTimer = setInterval(loadMetricHistory, 30000);
+    loadMetricHistory();
+    if (refreshInterval > 0) refreshTimer = setInterval(loadData, refreshInterval * 1000);
+    metricTimer = setInterval(loadMetricHistory, 180000);
     clockTimer = setInterval(() => { lastUpdateText = formatRelative(lastUpdate); }, 1000);
   });
-  onDestroy(() => { 
-    if (refreshTimer) clearInterval(refreshTimer); 
+  onDestroy(() => {
+    wsDestroyed = true;
+    if (refreshTimer) clearInterval(refreshTimer);
     if (metricTimer) clearInterval(metricTimer);
     if (clockTimer) clearInterval(clockTimer);
     if (processRefreshTimer) clearInterval(processRefreshTimer);
     if (dashboardWs) {
       dashboardWs.onclose = null;
       dashboardWs.close();
+      dashboardWs = null;
     }
   });
 </script>
