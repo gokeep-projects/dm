@@ -110,6 +110,34 @@
     return 'status-stopped';
   }
 
+  function healthTone(result) {
+    if (!result) return 'error';
+    if (result.status === 'ok' || result.effective_status === 'running') return 'ok';
+    if (result.status === 'warn' || result.effective_status === 'degraded') return 'warn';
+    return 'error';
+  }
+
+  function healthLabel(result) {
+    const tone = healthTone(result);
+    if (tone === 'ok') return '运行正常';
+    if (tone === 'warn') return '状态不一致';
+    return '异常';
+  }
+
+  function healthIcon(result) {
+    const tone = healthTone(result);
+    if (tone === 'ok') return '✓';
+    if (tone === 'warn') return '!';
+    return '✗';
+  }
+
+  function healthColor(result) {
+    const tone = healthTone(result);
+    if (tone === 'ok') return '#10b981';
+    if (tone === 'warn') return '#f59e0b';
+    return '#ef4444';
+  }
+
   function changeSort(key) {
     if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
     else {
@@ -541,15 +569,19 @@
           <div class="modal-loading"><div class="modal-spinner"></div><span>正在检查服务状态...</span></div>
         {:else if healthResult}
           <div class="health-result">
-            <div class="health-status-card" style="border-color:{healthResult.status === 'ok' ? '#10b981' : '#ef4444'}">
-              <div class="health-status-icon" style="color:{healthResult.status === 'ok' ? '#10b981' : '#ef4444'}">
-                {healthResult.status === 'ok' ? '✓' : '✗'}
+            <div class="health-status-card {healthTone(healthResult)}" style="border-color:{healthColor(healthResult)}">
+              <div class="health-status-icon" style="color:{healthColor(healthResult)}">
+                {healthIcon(healthResult)}
               </div>
               <div class="health-status-info">
-                <div class="health-status-text" style="color:{healthResult.status === 'ok' ? '#10b981' : '#ef4444'}">
-                  {healthResult.status === 'ok' ? '健康' : '异常'}
+                <div class="health-status-text" style="color:{healthColor(healthResult)}">
+                  {healthLabel(healthResult)}
                 </div>
                 <div class="health-message">{healthResult.message || ''}</div>
+              </div>
+              <div class="health-source">
+                <span>{healthResult.effective_status || '-'}</span>
+                <strong>{healthResult.status_source || '-'}</strong>
               </div>
             </div>
 
@@ -568,6 +600,14 @@
                   <div class="detail-row">
                     <span class="detail-label">是否运行</span>
                     <span class="detail-value" style="color:{healthResult.is_running ? '#10b981' : '#ef4444'}">{healthResult.is_running ? '是' : '否'}</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">有效状态</span>
+                    <span class="detail-value" style="color:{healthColor(healthResult)}">{healthResult.effective_status || '-'}</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">判定来源</span>
+                    <span class="detail-value">{healthResult.status_source || '-'}</span>
                   </div>
                   <div class="detail-row">
                     <span class="detail-label">匹配进程</span>
@@ -831,11 +871,16 @@
   .modal-spinner { width: 42px; height: 42px; border-radius: 50%; border: 3px solid rgba(34, 211, 238, 0.14); border-top-color: #22d3ee; border-right-color: rgba(16, 185, 129, 0.75); animation: spin 0.8s linear infinite; box-shadow: 0 0 18px rgba(34, 211, 238, 0.14); }
   .log-content { min-height: 100%; box-sizing: border-box; font-family: var(--theme-font-family-mono); font-size: 12px; line-height: 1.6; color: #d1d5db; white-space: pre-wrap; word-break: break-word; margin: 0; padding: 12px; background: #0b1020; border: 1px solid rgba(148, 163, 184, 0.16); border-radius: 8px; overflow: auto; }
   .health-result { }
-  .health-status-card { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid; border-radius: 12px; margin-bottom: 16px; background: linear-gradient(135deg, rgba(15,23,42,.72), rgba(20,184,166,.06)); box-shadow: inset 0 0 28px rgba(34,211,238,.04); }
+  .health-status-card { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 16px; border: 1px solid; border-radius: 12px; margin-bottom: 16px; background: linear-gradient(135deg, rgba(15,23,42,.72), rgba(20,184,166,.06)); box-shadow: inset 0 0 28px rgba(34,211,238,.04); }
+  .health-status-card.warn { background: linear-gradient(135deg, rgba(30, 24, 10, .72), rgba(245, 158, 11, .08)); }
+  .health-status-card.error { background: linear-gradient(135deg, rgba(30, 10, 15, .72), rgba(239, 68, 68, .08)); }
   .health-status-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 12px; background: rgba(15,23,42,.64); font-size: 22px; font-weight: 900; font-family: var(--theme-font-family-mono); }
-  .health-status-info { flex: 1; }
+  .health-status-info { min-width: 0; }
   .health-status-text { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
-  .health-message { font-size: 14px; color: var(--text-secondary); }
+  .health-message { font-size: 14px; color: var(--text-secondary); overflow-wrap: anywhere; }
+  .health-source { display: grid; gap: 4px; justify-items: end; padding: 8px 10px; border-radius: 9px; border: 1px solid rgba(148,163,184,.14); background: rgba(2,6,23,.36); font-family: var(--theme-font-family-mono); }
+  .health-source span { color: var(--text-tertiary); font-size: 10px; text-transform: uppercase; }
+  .health-source strong { color: #e0f2fe; font-size: 12px; }
   .health-details { display: flex; flex-direction: column; gap: 16px; }
   .health-detail-section { background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 10px; padding: 14px; }
   .health-detail-section h4 { font-size: 13px; font-weight: 600; color: var(--text-primary); margin: 0 0 10px; }

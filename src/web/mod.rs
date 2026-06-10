@@ -29,6 +29,7 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, mime)
+            .header(header::CACHE_CONTROL, static_cache_control(path))
             .body(axum::body::Body::from(content.data.to_vec()))
             .unwrap();
     }
@@ -36,6 +37,7 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")
             .body(axum::body::Body::from(content.data.to_vec()))
             .unwrap();
     }
@@ -43,6 +45,14 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
         .status(StatusCode::NOT_FOUND)
         .body(axum::body::Body::from("Not Found"))
         .unwrap()
+}
+
+fn static_cache_control(path: &str) -> &'static str {
+    if path == "index.html" {
+        "no-store, no-cache, must-revalidate"
+    } else {
+        "no-cache, must-revalidate"
+    }
 }
 
 pub fn build_router(config: Config) -> Router {
@@ -54,6 +64,8 @@ pub fn build_router(config: Config) -> Router {
         db,
         alert_cache: Arc::new(RwLock::new(AlertCache::default())),
         health_tasks: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        java_cancel_tokens: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        java_cancelled_keys: Arc::new(RwLock::new(std::collections::HashSet::new())),
         alert_refreshing: Arc::new(AtomicBool::new(false)),
     };
 
@@ -122,8 +134,14 @@ pub fn build_router(config: Config) -> Router {
         )
         .route("/api/system/info", get(api::system_info))
         .route("/api/system/processes", get(api::get_all_processes))
+        .route("/api/java/processes", get(api::java_processes))
+        .route("/api/java/analyze", post(api::java_analyze))
+        .route("/api/java/scan", post(api::java_scan))
+        .route("/api/java/hprof", post(api::java_hprof))
+        .route("/api/java/cancel/:key", post(api::java_cancel))
         .route("/api/traffic/interfaces", get(api::traffic_interfaces))
         .route("/api/docs", get(api::list_docs).post(api::create_doc_api))
+        .route("/api/docs/dirs", post(api::create_doc_dir_api))
         .route("/api/docs/import", post(api::import_doc_api))
         .route(
             "/api/docs/:id",

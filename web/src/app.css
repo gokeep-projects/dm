@@ -89,7 +89,8 @@ body::after {
 .maint-page,
 .rules-page,
 .import-report-page,
-.traffic-page {
+.traffic-page,
+.java-page {
   width: 100%;
   max-width: none !important;
   margin-left: 0 !important;
@@ -191,7 +192,18 @@ select:disabled,
 input,
 textarea,
 [contenteditable="true"] {
-  cursor: default !important;
+  cursor: auto !important;
+}
+
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="password"],
+input[type="email"],
+input[type="url"],
+textarea,
+[contenteditable="true"] {
+  cursor: text !important;
 }
 
 @keyframes float {
@@ -272,12 +284,6 @@ button:focus-visible { outline-offset: 1px; }
   }
 }
 
-*,
-*::before,
-*::after {
-  cursor: default !important;
-}
-
 html,
 body,
 body *,
@@ -289,14 +295,27 @@ body select,
 body summary,
 body label,
 body [role="button"],
-body [tabindex],
-body input,
-body textarea,
-body [contenteditable="true"],
 body input[type="button"],
 body input[type="submit"],
 body input[type="file"]::file-selector-button,
 body .drag-scrolling,
 body .resizing-column {
   cursor: default !important;
+}
+
+body input,
+body textarea,
+body [contenteditable="true"] {
+  cursor: auto !important;
+}
+
+body input[type="text"],
+body input[type="search"],
+body input[type="number"],
+body input[type="password"],
+body input[type="email"],
+body input[type="url"],
+body textarea,
+body [contenteditable="true"] {
+  cursor: text !important;
 }

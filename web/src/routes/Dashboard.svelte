@@ -38,9 +38,17 @@
   let metricRequestSeq = 0;
   let dropdownList = $state(null);
   let trendRangeEnd = $state(Date.now());
+  let trendVisible = $state({ cpu: true, mem: true, load: true, rx: true, tx: true });
 
   const SAMPLE_MIN_MS = 14 * 1000;
   const TOP_PROCESS_DISPLAY_LIMIT = 10;
+  const trendSeries = [
+    { key: 'cpu', label: 'CPU', cls: 'cpu' },
+    { key: 'mem', label: '内存', cls: 'mem' },
+    { key: 'load', label: '负载', cls: 'load' },
+    { key: 'rx', label: '接收', cls: 'rx' },
+    { key: 'tx', label: '发送', cls: 'tx' },
+  ];
   const trendOptions = [
     { value: 3, label: '3分钟' },
     { value: 30, label: '30分钟' },
@@ -112,7 +120,9 @@
     setTimeout(() => isRefreshing = false, 300);
   }
 
-  function fmt(b) { if (!b) return '0 B'; const k = 1024, s = ['B','KB','MB','GB']; let i = 0, v = b; while (v >= k && i < 3) { v /= k; i++; } return v.toFixed(1) + ' ' + s[i]; }
+  function fmt(b) { if (!b) return '0 B'; const k = 1024, s = ['B','KB','MB','GB','TB']; let i = 0, v = b; while (v >= k && i < s.length - 1) { v /= k; i++; } return v.toFixed(1) + ' ' + s[i]; }
+  function num(n) { return Number(n || 0).toLocaleString('zh-CN'); }
+  function pct(v) { return Math.max(0, Math.min(100, Number(v || 0))); }
   function upt(s) { const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return d + '天 ' + h + '时 ' + m + '分'; }
   function barColor(v) { if (v == null) return '#3b82f6'; if (v < 60) return '#3b82f6'; if (v < 80) return '#f59e0b'; return '#ef4444'; }
   function formatTime(ts) { if (!ts) return '-'; try { const d = new Date(ts.replace(' ', 'T')); const diff = Math.floor((Date.now() - d.getTime()) / 1000); if (diff < 60) return diff + '秒前'; if (diff < 3600) return Math.floor(diff/60) + '分钟前'; if (diff < 86400) return Math.floor(diff/3600) + '小时前'; return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }); } catch { return ts; } }
@@ -282,6 +292,10 @@
     return trendOptions.find(o => o.value === trendMinutes)?.label || '30分钟';
   }
 
+  function toggleTrendSeries(key) {
+    trendVisible = { ...trendVisible, [key]: !trendVisible[key] };
+  }
+
   function chartHover(event, chart) {
     const history = windowedMetricHistory();
     if (!history.length) return;
@@ -368,6 +382,8 @@
     if (key === 'memory_bytes') return Number(p.memory_bytes || 0);
     if (key === 'status') return p.status || '';
     if (key === 'cmd') return p.cmd || p.name || '';
+    if (key === 'path') return procPath(p);
+    if (key === 'ports') return procPorts(p);
     return p.name || '';
   }
 
@@ -396,6 +412,51 @@
     if (ratio > 2) return 'critical';
     if (ratio > 1) return 'warning';
     return 'normal';
+  }
+
+  function loadRatio() {
+    return sys?.cpu_count ? Math.min(((sys.load_avg?.one || 0) / sys.cpu_count) * 100, 300) : 0;
+  }
+
+  function bootTimeText() {
+    if (!sys?.boot_time) return '-';
+    return new Date(Number(sys.boot_time) * 1000).toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function successRate() {
+    const total = Number(stats?.total_executions || 0);
+    return total ? Math.round((Number(stats?.success_count || 0) / total) * 100) : 0;
+  }
+
+  function shortPath(value, max = 28) {
+    const text = String(value || '-');
+    if (text.length <= max) return text;
+    const keep = Math.floor((max - 3) / 2);
+    return text.slice(0, keep) + '...' + text.slice(-keep);
+  }
+
+  function procPath(p) {
+    return p?.path || p?.cmd || p?.exe_path || '-';
+  }
+
+  function procPorts(p) {
+    const ports = Array.isArray(p?.ports) ? p.ports : [];
+    if (ports.length) return ports.join(', ');
+    return p?.ports || '-';
+  }
+
+  function networkKind(n) {
+    if (!n?.name) return '未知';
+    if (n.name === 'lo' || n.ip?.startsWith?.('127.')) return '回环';
+    if (n.name.includes('docker') || n.name.includes('br-') || n.name.includes('veth') || n.name.includes('virbr')) return '虚拟';
+    return '物理';
+  }
+
+  function loadLevelLabel() {
+    const level = loadLevel(sys?.load_avg?.one, sys?.cpu_count);
+    if (level === 'critical') return '高压';
+    if (level === 'warning') return '偏高';
+    return '正常';
   }
 
   let quickItems = $derived.by(() => {
@@ -457,6 +518,76 @@
       return cmp;
     }).slice(0, TOP_PROCESS_DISPLAY_LIMIT);
   });
+
+  let resourceTiles = $derived.by(() => {
+    const rx = latestRate('rx');
+    const tx = latestRate('tx');
+    const netPeak = Math.max(1, ...networkRatePoints('rx').map(p => p.value), ...networkRatePoints('tx').map(p => p.value));
+    const netValue = Math.min(100, ((rx + tx) / Math.max(1, netPeak * 2)) * 100);
+    return [
+      {
+        key: 'cpu',
+        label: 'CPU',
+        value: pct(sys?.cpu_usage),
+        primary: `${(sys?.cpu_usage || 0).toFixed(1)}%`,
+        detail: `${sys?.cpu_count || 0}核 · ${sys?.cpu_brand || '未知 CPU'}`,
+      },
+      {
+        key: 'load',
+        label: '负载',
+        value: Math.min(100, loadRatio()),
+        primary: `${(sys?.load_avg?.one || 0).toFixed(2)}`,
+        detail: `1/5/15 分钟 ${sys?.load_avg?.one?.toFixed?.(2) || '0.00'} / ${sys?.load_avg?.five?.toFixed?.(2) || '0.00'} / ${sys?.load_avg?.fifteen?.toFixed?.(2) || '0.00'}`,
+      },
+      {
+        key: 'mem',
+        label: '内存',
+        value: pct(sys?.memory_usage),
+        primary: `${(sys?.memory_usage || 0).toFixed(1)}%`,
+        detail: `${fmt(sys?.memory_used)} / ${fmt(sys?.memory_total)}`,
+      },
+      {
+        key: 'swap',
+        label: '交换',
+        value: pct(sys?.swap_usage),
+        primary: `${(sys?.swap_usage || 0).toFixed(1)}%`,
+        detail: `${fmt(sys?.swap_used)} / ${fmt(sys?.swap_total)}`,
+      },
+      {
+        key: 'disk',
+        label: '磁盘',
+        value: pct(sys?.disk_usage),
+        primary: `${(sys?.disk_usage || 0).toFixed(1)}%`,
+        detail: `${fmt(sys?.disk_used)} / ${fmt(sys?.disk_total)}`,
+      },
+      {
+        key: 'net',
+        label: '网络',
+        value: netValue,
+        primary: `${fmt(rx + tx)}/s`,
+        detail: `RX ${fmt(rx)}/s · TX ${fmt(tx)}/s`,
+      },
+    ];
+  });
+
+  let categoryRows = $derived.by(() => Object.entries(stats?.categories || {})
+    .map(([name, count]) => ({ name, count: Number(count || 0) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 12));
+
+  let diskRows = $derived.by(() => [...(sys?.disks || [])]
+    .sort((a, b) => Number(b.usage || 0) - Number(a.usage || 0))
+    .slice(0, 10));
+
+  let networkRows = $derived.by(() => [...(sys?.networks || [])]
+    .sort((a, b) => {
+      const ap = networkKind(a) === '物理' ? 0 : networkKind(a) === '回环' ? 1 : 2;
+      const bp = networkKind(b) === '物理' ? 0 : networkKind(b) === '回环' ? 1 : 2;
+      return ap - bp || String(a.name).localeCompare(String(b.name), 'zh-CN');
+    })
+    .slice(0, 10));
+
+  let recentExecRows = $derived.by(() => [...(stats?.recent_execs || [])].slice(0, 12));
 
   let sortedHistory = $derived.by(() => {
     return [...statListData].sort((a, b) => {
@@ -535,52 +666,55 @@
 </script>
 
 <div class="dashboard">
-  <div class="dash-top">
-    <div class="health-card">
+  <section class="hero-console">
+    <div class="health-orbit">
       {#if sys}
         {@const h = healthScore()}
-        <div class="health-score" style="color:{healthColor(h.level)}">{h.score}</div>
-        <div class="health-label" style="color:{healthColor(h.level)}">{h.label}</div>
+        <div class="orbit-ring" style="--score:{h.score};--health:{healthColor(h.level)}">
+          <strong>{h.score}</strong>
+          <span>{h.label}</span>
+        </div>
+      {:else}
+        <div class="orbit-ring"><strong>--</strong><span>加载中</span></div>
       {/if}
     </div>
-    <div class="stat-cards">
-      <div class="mini-stat">
-        <span class="mini-val">{stats?.total_scripts ?? 0}</span>
-        <span class="mini-label">脚本</span>
+    <div class="hero-main">
+      <div class="hero-title">
+        <span class="status-pill" class:online={wsConnected}><i></i>{wsConnected ? '实时链路在线' : '接口轮询模式'}</span>
+        <h1>{sys?.hostname || 'DM 控制台'}</h1>
+        <p>{sys?.os || '-'} · {sys?.kernel || '-'} · {sys?.arch || '-'} · 启动 {bootTimeText()}</p>
       </div>
-      <div class="mini-stat">
-        <span class="mini-val">{stats?.total_executions ?? 0}</span>
-        <span class="mini-label">执行</span>
-      </div>
-      <div class="mini-stat">
-        <span class="mini-val" style="color:#10b981">{stats?.success_count ?? 0}</span>
-        <span class="mini-label">成功</span>
-      </div>
-      <div class="mini-stat">
-        <span class="mini-val" style="color:#ef4444">{stats?.failure_count ?? 0}</span>
-        <span class="mini-label">失败</span>
+      <div class="hero-kpis">
+        <div class="kpi-card"><span>维护脚本</span><strong>{num(stats?.total_scripts)}</strong><em>{num(categoryRows.length)} 类</em></div>
+        <div class="kpi-card"><span>执行总量</span><strong>{num(stats?.total_executions)}</strong><em>成功率 {successRate()}%</em></div>
+        <div class="kpi-card good"><span>成功</span><strong>{num(stats?.success_count)}</strong><em>最近 {recentExecRows.length} 条</em></div>
+        <div class="kpi-card bad"><span>失败</span><strong>{num(stats?.failure_count)}</strong><em>{stats?.failure_count ? '需要关注' : '无异常记录'}</em></div>
+        <div class="kpi-card"><span>进程</span><strong>{num(sys?.process_count)}</strong><em>{sys?.cpu_count || 0} 核 CPU</em></div>
+        <div class="kpi-card load" data-level={loadLevel(sys?.load_avg?.one, sys?.cpu_count)}><span>负载</span><strong>{(sys?.load_avg?.one || 0).toFixed(2)}</strong><em>{loadLevelLabel()} · {loadRatio().toFixed(0)}%</em></div>
       </div>
     </div>
-    <div class="meta-bar">
-      <div class="meta-item"><span class="meta-dot" class:active={isRefreshing}></span><span>{lastUpdateText}</span></div>
-      <div class="refresh-select">{#each refreshOptions as opt}<button class="refresh-opt" class:active={refreshInterval === opt.value} onclick={() => setRefreshInterval(opt.value)}>{opt.label}</button>{/each}</div>
+    <div class="hero-side">
+      <div class="meta-line"><span>公网/主IP</span><strong>{getPublicIp()}</strong></div>
+      <div class="meta-line"><span>运行时间</span><strong>{sys?.uptime ? upt(sys.uptime) : '-'}</strong></div>
+      <div class="meta-line"><span>刷新</span><strong>{lastUpdateText}</strong></div>
+        <div class="refresh-select">{#each refreshOptions as opt}<button type="button" class="refresh-opt" class:active={refreshInterval === opt.value} onclick={() => setRefreshInterval(opt.value)}>{opt.label}</button>{/each}</div>
     </div>
-  </div>
+  </section>
 
-  <div class="quick-run-section">
+  <section class="quick-run-section">
     <div class="qr-header">
       <h2>快速执行</h2>
-      <div class="qr-status ready">选择脚本或检查后进入结果页执行</div>
+      <div class="qr-status ready">输入编号、名称、类别或 ID，直接进入执行/检查结果页</div>
     </div>
     <div class="qr-controls">
       <div class="qr-select-wrap">
-        <button class="qr-select-btn" onclick={() => { showScriptSelect = !showScriptSelect; if (showScriptSelect) setTimeout(() => searchInput?.focus(), 100); }}>
-          {selectedQuickItem ? `${selectedQuickItem.kindLabel} · ${selectedQuickItem.name || selectedQuickItem.id}` : '选择脚本或检查...'}
+        <button type="button" class="qr-select-btn" onclick={() => { showScriptSelect = !showScriptSelect; if (showScriptSelect) setTimeout(() => searchInput?.focus(), 100); }}>
+          <span>{selectedQuickItem ? `${selectedQuickItem.kindLabel} · ${selectedQuickItem.name || selectedQuickItem.id}` : '选择脚本或检查...'}</span>
           <span class="qr-select-arrow">▼</span>
         </button>
         {#if showScriptSelect}
           <div class="qr-dropdown">
-            <input type="text" placeholder="输入编号、名称、ID 搜索脚本或检查..." bind:value={scriptSearch} bind:this={searchInput} class="qr-dropdown-search" oninput={() => dropdownIndex = 0} onkeydown={(e) => {
+            <input type="text" placeholder="搜索编号、名称、ID、类别..." bind:value={scriptSearch} bind:this={searchInput} class="qr-dropdown-search" oninput={() => dropdownIndex = 0} onkeydown={(e) => {
               if (e.key === 'ArrowDown') { e.preventDefault(); moveDropdownSelection(1); }
               else if (e.key === 'ArrowUp') { e.preventDefault(); moveDropdownSelection(-1); }
               else if (e.key === 'Enter') { e.preventDefault(); if (filteredQuickItems[dropdownIndex]) { quickRunItem = filteredQuickItems[dropdownIndex].value; showScriptSelect = false; } }
@@ -588,7 +722,7 @@
             }} />
             <div class="qr-dropdown-list" bind:this={dropdownList}>
               {#each filteredQuickItems as s, i}
-                <button class="qr-dropdown-item" class:item-active={i === dropdownIndex} onclick={() => { quickRunItem = s.value; showScriptSelect = false; }}>
+                <button type="button" class="qr-dropdown-item" class:item-active={i === dropdownIndex} onclick={() => { quickRunItem = s.value; showScriptSelect = false; }}>
                   <span class="qr-item-number">#{s.numberLabel}</span>
                   <span class="qr-item-type" class:check-type={s.kind === 'check'}>{s.kindLabel}</span>
                   <span class="qr-item-icon">{s.kind === 'check' ? 'CHK' : s.category === '系统检查' ? 'SYS' : s.category === '系统安全' ? 'SEC' : 'RUN'}</span>
@@ -605,112 +739,161 @@
           </div>
         {/if}
       </div>
-      <button class="qr-btn qr-start" onclick={() => startQuickRun(quickRunItem)} disabled={!quickRunItem}>执行并查看结果</button>
+      <button type="button" class="qr-btn qr-start" onclick={() => startQuickRun(quickRunItem)} disabled={!quickRunItem}>执行并查看结果</button>
     </div>
-  </div>
+  </section>
 
-  <div class="main-grid">
-    <div class="left-col">
-      <div class="resource-section"><h3>系统资源</h3>
-        <div class="resource-bars">
-          <div class="res-item"><div class="res-header"><span>CPU</span><span style="color:{barColor(sys?.cpu_usage)}">{(sys?.cpu_usage || 0).toFixed(1)}%</span></div><div class="res-bar"><div class="res-fill" style="width:{Math.min(sys?.cpu_usage || 0, 100)}%;background:{barColor(sys?.cpu_usage)}"></div></div><div class="res-detail">{sys?.cpu_brand || '-'} · {sys?.cpu_count || 0} 核</div></div>
-          <div class="res-item"><div class="res-header"><span>内存</span><span style="color:{barColor(sys?.memory_usage)}">{(sys?.memory_usage || 0).toFixed(1)}%</span></div><div class="res-bar"><div class="res-fill" style="width:{Math.min(sys?.memory_usage || 0, 100)}%;background:{barColor(sys?.memory_usage)}"></div></div><div class="res-detail">{fmt(sys?.memory_used)} / {fmt(sys?.memory_total)}</div></div>
-          <div class="res-item"><div class="res-header"><span>磁盘</span><span style="color:{barColor(sys?.disk_usage)}">{(sys?.disk_usage || 0).toFixed(1)}%</span></div><div class="res-bar"><div class="res-fill" style="width:{Math.min(sys?.disk_usage || 0, 100)}%;background:{barColor(sys?.disk_usage)}"></div></div><div class="res-detail">{fmt(sys?.disk_used)} / {fmt(sys?.disk_total)}</div></div>
+  <section class="dense-grid">
+    <div class="panel resource-panel">
+      <div class="panel-head"><h3>资源雷达</h3><span>{sys?.cpu_brand || '-'}</span></div>
+      <div class="resource-matrix">
+        {#each resourceTiles as item}
+          <div class="resource-tile {item.key}">
+            <div class="tile-top"><span>{item.label}</span><strong style="color:{barColor(item.value)}">{item.primary}</strong></div>
+            <div class="res-bar"><div class="res-fill" style="width:{item.value}%;background:{barColor(item.value)}"></div></div>
+            <em>{item.detail}</em>
+          </div>
+        {/each}
+      </div>
+    </div>
+
+    <div class="panel trend-card">
+      <div class="trend-head">
+        <h3>系统趋势 <span class="load-hint">最近 {selectedTrendLabel()} · {timeRangeLabel()}</span></h3>
+        <div class="trend-values">
+          <div class="trend-range">
+            {#each trendOptions as opt}
+              <button type="button" class:active={trendMinutes === opt.value} disabled={trendLoading && trendMinutes === opt.value} onclick={() => setTrendMinutes(opt.value)}>{opt.label}</button>
+            {/each}
+          </div>
+          {#each trendSeries as item}
+            <button
+              type="button"
+              class="trend-chip {item.cls}"
+              class:muted={!trendVisible[item.key]}
+              onclick={() => toggleTrendSeries(item.key)}
+              aria-pressed={trendVisible[item.key]}>
+              {item.label}
+              {#if item.key === 'cpu'}{(sys?.cpu_usage || 0).toFixed(1)}%{/if}
+              {#if item.key === 'mem'}{(sys?.memory_usage || 0).toFixed(1)}%{/if}
+              {#if item.key === 'load'}{sys?.load_avg?.one?.toFixed(2) || '0.00'}{/if}
+              {#if item.key === 'rx'}↓ {fmt(latestRate('rx'))}/s{/if}
+              {#if item.key === 'tx'}↑ {fmt(latestRate('tx'))}/s{/if}
+            </button>
+          {/each}
         </div>
       </div>
-      <div class="load-section trend-card">
-        <div class="trend-head">
-          <h3>系统趋势 <span class="load-hint">最近 {selectedTrendLabel()} · {timeRangeLabel()}</span></h3>
-          <div class="trend-values">
-            <div class="trend-range">
-              {#each trendOptions as opt}
-                <button class:active={trendMinutes === opt.value} disabled={trendLoading && trendMinutes === opt.value} onclick={() => setTrendMinutes(opt.value)}>{opt.label}</button>
-              {/each}
-            </div>
-            <span class="trend-chip cpu">CPU {(sys?.cpu_usage || 0).toFixed(1)}%</span>
-            <span class="trend-chip mem">内存 {(sys?.memory_usage || 0).toFixed(1)}%</span>
-            <span class="trend-chip load">负载 {sys?.load_avg?.one?.toFixed(2) || '0.00'}</span>
-            <span class="trend-chip rx">↓ {fmt(latestRate('rx'))}/s</span>
-            <span class="trend-chip tx">↑ {fmt(latestRate('tx'))}/s</span>
-            <span class="trend-chip total">总量 {fmt(networkTotals().rx + networkTotals().tx)}</span>
+      <div class="trend-chart" role="img" aria-label="系统趋势悬停查看数值" onmousemove={(e) => chartHover(e, 'system')} onmouseleave={() => hideTrendHover('system')}>
+        <svg viewBox="0 0 620 150" preserveAspectRatio="none" aria-label="CPU、内存、负载、网络收发趋势">
+          <defs>
+            <linearGradient id="trendCpu" x1="0" x2="1"><stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#38bdf8"/></linearGradient>
+            <linearGradient id="trendMem" x1="0" x2="1"><stop offset="0%" stop-color="#a78bfa"/><stop offset="100%" stop-color="#f472b6"/></linearGradient>
+            <linearGradient id="trendLoad" x1="0" x2="1"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#f97316"/></linearGradient>
+            <linearGradient id="trendRx" x1="0" x2="1"><stop offset="0%" stop-color="#34d399"/><stop offset="100%" stop-color="#22c55e"/></linearGradient>
+            <linearGradient id="trendTx" x1="0" x2="1"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#818cf8"/></linearGradient>
+          </defs>
+          <g class="chart-grid">
+            <line x1="10" y1="10" x2="610" y2="10"/><line x1="10" y1="75" x2="610" y2="75"/><line x1="10" y1="140" x2="610" y2="140"/>
+            <line x1="10" y1="10" x2="10" y2="140"/><line x1="210" y1="10" x2="210" y2="140"/><line x1="410" y1="10" x2="410" y2="140"/><line x1="610" y1="10" x2="610" y2="140"/>
+          </g>
+          {#if trendVisible.cpu}<polyline class="trend-line cpu-line" points={seriesPath('cpu', 100)} />{/if}
+          {#if trendVisible.mem}<polyline class="trend-line mem-line" points={seriesPath('mem', 100)} />{/if}
+          {#if trendVisible.load}<polyline class="trend-line load-line" points={seriesPath('load', 300)} />{/if}
+          {#if trendVisible.rx}<polyline class="trend-line rx-line" points={netPath('rx')} />{/if}
+          {#if trendVisible.tx}<polyline class="trend-line tx-line" points={netPath('tx')} />{/if}
+        </svg>
+        {#if trendLoading}
+          <div class="trend-loading"><span></span><em>切换 {selectedTrendLabel()} 数据</em></div>
+        {/if}
+        {#if trendHover?.chart === 'system'}
+          <div class="trend-tooltip" style="left:{trendHover.x}px;top:{trendHover.y}px">
+            <strong>{hoverTime(trendHover.point)}</strong>
+            {#if trendVisible.cpu}<span>CPU {trendHover.point.cpu.toFixed(1)}%</span>{/if}
+            {#if trendVisible.mem}<span>内存 {trendHover.point.mem.toFixed(1)}%</span>{/if}
+            {#if trendVisible.load}<span>负载 {trendHover.point.load_one?.toFixed?.(2) || '-'}</span>{/if}
+            {#if trendVisible.rx}<span>接收 {fmt(hoverRate('rx'))}/s</span>{/if}
+            {#if trendVisible.tx}<span>发送 {fmt(hoverRate('tx'))}/s</span>{/if}
           </div>
-        </div>
-        <div class="trend-chart" role="img" aria-label="系统趋势悬停查看数值" onmousemove={(e) => chartHover(e, 'system')} onmouseleave={() => hideTrendHover('system')}>
-          <svg viewBox="0 0 620 150" preserveAspectRatio="none" aria-label="CPU、内存、负载、网络收发趋势">
-            <defs>
-              <linearGradient id="trendCpu" x1="0" x2="1"><stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#38bdf8"/></linearGradient>
-              <linearGradient id="trendMem" x1="0" x2="1"><stop offset="0%" stop-color="#a78bfa"/><stop offset="100%" stop-color="#f472b6"/></linearGradient>
-              <linearGradient id="trendLoad" x1="0" x2="1"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#f97316"/></linearGradient>
-              <linearGradient id="trendRx" x1="0" x2="1"><stop offset="0%" stop-color="#34d399"/><stop offset="100%" stop-color="#22c55e"/></linearGradient>
-              <linearGradient id="trendTx" x1="0" x2="1"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#818cf8"/></linearGradient>
-            </defs>
-            <g class="chart-grid">
-              <line x1="10" y1="10" x2="610" y2="10"/><line x1="10" y1="75" x2="610" y2="75"/><line x1="10" y1="140" x2="610" y2="140"/>
-              <line x1="10" y1="10" x2="10" y2="140"/><line x1="210" y1="10" x2="210" y2="140"/><line x1="410" y1="10" x2="410" y2="140"/><line x1="610" y1="10" x2="610" y2="140"/>
-            </g>
-            <polyline class="trend-line cpu-line" points={seriesPath('cpu', 100)} />
-            <polyline class="trend-line mem-line" points={seriesPath('mem', 100)} />
-            <polyline class="trend-line load-line" points={seriesPath('load', 300)} />
-            <polyline class="trend-line rx-line" points={netPath('rx')} />
-            <polyline class="trend-line tx-line" points={netPath('tx')} />
-          </svg>
-          {#if trendLoading}
-            <div class="trend-loading"><span></span><em>切换 {selectedTrendLabel()} 数据</em></div>
-          {/if}
-          {#if trendHover?.chart === 'system'}
-            <div class="trend-tooltip" style="left:{trendHover.x}px;top:{trendHover.y}px">
-              <strong>{hoverTime(trendHover.point)}</strong>
-              <span>CPU {trendHover.point.cpu.toFixed(1)}%</span>
-              <span>内存 {trendHover.point.mem.toFixed(1)}%</span>
-              <span>负载 {trendHover.point.load_one?.toFixed?.(2) || '-'}</span>
-              <span>接收 {fmt(hoverRate('rx'))}/s</span>
-              <span>发送 {fmt(hoverRate('tx'))}/s</span>
-            </div>
-          {/if}
-          <div class="trend-axis">
-            <span>{new Date(trendRangeStart()).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-            <span>{new Date(trendRangeStart() + trendWindowMs() / 2).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-            <span>{new Date(trendRangeEnd).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-          </div>
+        {/if}
+        <div class="trend-axis">
+          <span>{new Date(trendRangeStart()).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
+          <span>{new Date(trendRangeStart() + trendWindowMs() / 2).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
+          <span>{new Date(trendRangeEnd).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
         </div>
       </div>
     </div>
-    <div class="right-col">
-      <div class="sys-info-section"><h3>ℹ️ 系统信息</h3><div class="info-rows">
-        <div class="info-row"><span>主机</span><span>{sys?.hostname || '-'}</span></div>
-        <div class="info-row"><span>IP</span><span class="ip-value">{getPublicIp()}</span></div>
-        <div class="info-row"><span>系统</span><span>{sys?.os || '-'}</span></div>
-        <div class="info-row"><span>内核</span><span>{sys?.kernel || '-'}</span></div>
-        <div class="info-row"><span>架构</span><span>{sys?.arch || '-'} · {sys?.cpu_count || 0}核</span></div>
-        <div class="info-row"><span>运行</span><span>{sys?.uptime ? upt(sys.uptime) : '-'}</span></div>
-        <div class="info-row"><span>进程</span><span>{sys?.process_count || 0}</span></div>
-      </div></div>
-      {#if sys?.top_processes?.length}
-        <div class="proc-section">
-          <h3>Top 进程 <span class="proc-hint">(CPU+内存综合)</span></h3>
-          <div class="proc-table">
-            <div class="proc-header">
-              <span class="proc-col-rank">#</span>
-              <button class="proc-sort proc-col-name" onclick={() => changeTopProcessSort('name')}>进程名{sortMark(topProcessSortKey, topProcessSortDir, 'name')}</button>
-              <button class="proc-sort proc-col-cpu" onclick={() => changeTopProcessSort('cpu_usage')}>CPU{sortMark(topProcessSortKey, topProcessSortDir, 'cpu_usage')}</button>
-              <button class="proc-sort proc-col-mem" onclick={() => changeTopProcessSort('memory_bytes')}>内存{sortMark(topProcessSortKey, topProcessSortDir, 'memory_bytes')}</button>
-            </div>
-            <div class="proc-list">
-              {#each sortedTopProcesses as p, i}
-                <div class="proc-row" class:proc-warning={p.cpu_usage > 50} class:proc-critical={p.cpu_usage > 80}>
-                  <span class="proc-col-rank">{i + 1}</span>
-                  <span class="proc-col-name">{p.name}</span>
-                  <span class="proc-col-cpu" style="color:{barColor(p.cpu_usage)}">{p.cpu_usage.toFixed(1)}%</span>
-                  <span class="proc-col-mem">{fmt(p.memory_bytes)}</span>
-                </div>
-              {/each}
-            </div>
-          </div>
-          <button class="proc-more-btn" onclick={showAllProcessesPanel}>查看所有进程 →</button>
-        </div>
-      {/if}
+
+    <div class="panel system-panel">
+      <div class="panel-head"><h3>系统概要</h3><span>{sys?.hostname || '-'}</span></div>
+      <div class="info-rows compact">
+        <div class="info-row"><span>主IP</span><strong class="ip-value">{getPublicIp()}</strong></div>
+        <div class="info-row"><span>系统</span><strong title={sys?.os || '-'}>{shortPath(sys?.os, 30)}</strong></div>
+        <div class="info-row"><span>内核</span><strong>{sys?.kernel || '-'}</strong></div>
+        <div class="info-row"><span>架构</span><strong>{sys?.arch || '-'} / {sys?.cpu_count || 0}核</strong></div>
+        <div class="info-row"><span>运行</span><strong>{sys?.uptime ? upt(sys.uptime) : '-'}</strong></div>
+        <div class="info-row"><span>网络总量</span><strong>{fmt(networkTotals().rx + networkTotals().tx)}</strong></div>
+      </div>
     </div>
-  </div>
+
+    <div class="panel proc-section">
+      <div class="panel-head">
+        <h3>TOP 进程</h3>
+        <button type="button" class="panel-link" onclick={showAllProcessesPanel}>全部进程</button>
+      </div>
+      <div class="proc-table">
+        <div class="proc-header">
+          <span class="proc-col-rank">#</span>
+          <button type="button" class="proc-sort proc-col-name" onclick={() => changeTopProcessSort('name')}>名称{sortMark(topProcessSortKey, topProcessSortDir, 'name')}</button>
+          <button type="button" class="proc-sort proc-col-path" onclick={() => changeTopProcessSort('path')}>路径{sortMark(topProcessSortKey, topProcessSortDir, 'path')}</button>
+          <button type="button" class="proc-sort proc-col-ports" onclick={() => changeTopProcessSort('ports')}>端口{sortMark(topProcessSortKey, topProcessSortDir, 'ports')}</button>
+          <button type="button" class="proc-sort proc-col-cpu" onclick={() => changeTopProcessSort('cpu_usage')}>CPU{sortMark(topProcessSortKey, topProcessSortDir, 'cpu_usage')}</button>
+          <button type="button" class="proc-sort proc-col-mem" onclick={() => changeTopProcessSort('memory_bytes')}>内存{sortMark(topProcessSortKey, topProcessSortDir, 'memory_bytes')}</button>
+        </div>
+        <div class="proc-list">
+          {#each sortedTopProcesses as p, i}
+            <div class="proc-row" class:proc-warning={p.cpu_usage > 50} class:proc-critical={p.cpu_usage > 80}>
+              <span class="proc-col-rank">{i + 1}</span>
+              <span class="proc-col-name" title={p.name}>{p.name}</span>
+              <span class="proc-col-path" title={procPath(p)}>{procPath(p)}</span>
+              <span class="proc-col-ports" title={procPorts(p)}>{procPorts(p)}</span>
+              <span class="proc-col-cpu" style="color:{barColor(p.cpu_usage)}">{p.cpu_usage.toFixed(1)}%</span>
+              <span class="proc-col-mem">{fmt(p.memory_bytes)}</span>
+            </div>
+          {:else}
+            <div class="empty-row">暂无进程数据</div>
+          {/each}
+        </div>
+      </div>
+    </div>
+
+    <div class="panel io-panel">
+      <div class="panel-head"><h3>磁盘 / 网卡</h3><span>{diskRows.length} 磁盘 · {networkRows.length} 网卡</span></div>
+      <div class="split-lists">
+        <div class="mini-list">
+          {#each diskRows as d}
+            <div class="mini-row" title={`${d.mount_point} ${d.fs_type || ''}`}>
+              <span>{shortPath(d.mount_point || d.name, 18)}</span>
+              <strong style="color:{barColor(d.usage)}">{Number(d.usage || 0).toFixed(1)}%</strong>
+              <em>{fmt(d.used)} / {fmt(d.total)}</em>
+            </div>
+          {:else}
+            <div class="empty-row">暂无磁盘数据</div>
+          {/each}
+        </div>
+        <div class="mini-list">
+          {#each networkRows as n}
+            <div class="mini-row" title={`${n.name} ${n.ip || ''} ${n.mac || ''}`}>
+              <span>{n.name}<small>{networkKind(n)}</small></span>
+              <strong>{n.ip || '-'}</strong>
+              <em>RX {fmt(n.received_bytes)} · TX {fmt(n.transmitted_bytes)}</em>
+            </div>
+          {:else}
+            <div class="empty-row">暂无网卡数据</div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  </section>
 </div>
 
 {#if showStatList}
@@ -773,87 +956,175 @@
 {/if}
 
 <style>
-  .dashboard { width: 100%; max-width: none; margin: 0; }
-  .dash-top { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; padding: 12px 16px; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 12px; }
-  .health-card { display: flex; flex-direction: column; align-items: center; min-width: 60px; }
-  .health-score { font-size: 28px; font-weight: 800; font-family: var(--theme-font-family-mono); }
-  .health-label { font-size: 11px; font-weight: 600; }
-  .stat-cards { display: flex; gap: 12px; flex: 1; }
-  .mini-stat { display: flex; flex-direction: column; align-items: center; padding: 4px 12px; background: none; border: none; cursor: pointer; }
-  .mini-stat:hover { background: var(--bg-hover); border-radius: 8px; }
-  .mini-val { font-size: 20px; font-weight: 700; color: var(--text-primary); font-family: var(--theme-font-family-mono); }
-  .mini-label { font-size: 10px; color: var(--text-tertiary); }
-  .meta-bar { display: flex; align-items: center; gap: 10px; margin-left: auto; }
-  .meta-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-tertiary); }
-  .meta-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
-  .meta-dot.active { background: #3b82f6; box-shadow: 0 0 6px rgba(59,130,246,0.6); }
-  .refresh-select { display: flex; gap: 1px; background: var(--bg-secondary); border-radius: 6px; padding: 2px; }
-  .refresh-opt { padding: 3px 6px; border: none; background: transparent; color: var(--text-tertiary); font-size: 10px; cursor: pointer; border-radius: 4px; }
-  .refresh-opt.active { background: var(--bg-card); color: var(--accent-primary); }
-  .quick-run-section { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
-  .qr-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .qr-header h2 { font-size: 14px; font-weight: 700; color: var(--text-primary); margin: 0; }
-  .qr-status { font-size: 11px; padding: 3px 8px; border-radius: 6px; display: flex; align-items: center; gap: 4px; }
-  .qr-status.ready { background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-primary); }
-  .qr-controls { display: flex; gap: 8px; align-items: center; }
-  .qr-select-wrap { flex: 1; position: relative; }
-  .qr-select-btn { width: 100%; padding: 8px 12px; background: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 8px; font-size: 12px; color: var(--text-primary); cursor: pointer; text-align: left; display: flex; justify-content: space-between; align-items: center; }
-  .qr-select-btn:hover { border-color: var(--border-focus); }
-  .qr-select-arrow { font-size: 10px; color: var(--text-tertiary); }
-  .qr-dropdown { position: absolute; top: 100%; left: 0; right: 0; background: var(--bg-card); border: 1px solid rgba(34, 211, 238, .22); border-radius: 8px; margin-top: 4px; z-index: 30; box-shadow: var(--shadow-lg); overflow: hidden; }
-  .qr-dropdown-search { width: 100%; padding: 9px 12px; background: var(--bg-input); border: none; border-bottom: 1px solid var(--border-primary); font-size: 12px; color: var(--text-primary); outline: none; box-sizing: border-box; }
-  .qr-dropdown-search::placeholder { color: var(--text-tertiary); }
-  .qr-dropdown-list { max-height: 300px; overflow-y: auto; }
-  .qr-dropdown-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: transparent; border: none; border-bottom: 1px solid var(--border-secondary); width: 100%; cursor: pointer; text-align: left; color: var(--text-primary); }
-  .qr-dropdown-item:hover { background: rgba(34, 211, 238, .08); }
-  .qr-dropdown-item.item-active { background: rgba(20, 184, 166, .18); }
-  .qr-item-number { display: inline-grid; place-items: center; min-width: 38px; height: 24px; border-radius: 7px; border: 1px solid rgba(34,211,238,.22); background: rgba(34,211,238,.08); color: var(--accent-primary); font-family: var(--theme-font-family-mono); font-size: 10px; font-weight: 900; flex-shrink: 0; }
-  .qr-item-type { display: inline-grid; place-items: center; min-width: 36px; height: 22px; border-radius: 999px; border: 1px solid rgba(96,165,250,.28); background: rgba(96,165,250,.12); color: #60a5fa; font-size: 10px; font-weight: 900; flex-shrink: 0; }
-  .qr-item-type.check-type { border-color: rgba(52,211,153,.28); background: rgba(52,211,153,.12); color: #34d399; }
-  .qr-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 8px; background: rgba(34,211,238,.12); border: 1px solid rgba(34,211,238,.18); color: #67e8f9; font-family: var(--theme-font-family-mono); font-size: 11px; font-weight: 900; flex-shrink: 0; }
-  .qr-item-info { flex: 1; }
-  .qr-item-name { display: block; font-size: 13px; font-weight: 600; color: var(--text-primary); }
-  .qr-item-id { display: block; font-size: 10px; color: var(--text-tertiary); font-family: var(--theme-font-family-mono); }
-  .qr-item-desc { display: block; font-size: 11px; color: var(--text-secondary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .qr-btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .dashboard {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    min-height: 0;
+    margin: 0;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: minmax(112px, .64fr) minmax(66px, auto) minmax(0, 4.9fr);
+    gap: 8px;
+    box-sizing: border-box;
+    color: var(--text-primary);
+  }
+  .hero-console,
+  .quick-run-section,
+  .panel {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(34, 211, 238, .14);
+    background:
+      linear-gradient(135deg, rgba(9, 14, 28, .96), rgba(8, 13, 24, .92)),
+      radial-gradient(circle at 80% 0%, rgba(34, 211, 238, .12), transparent 34%);
+    box-shadow: 0 18px 46px rgba(2, 6, 23, .26), inset 0 0 36px rgba(34, 211, 238, .035);
+  }
+  .hero-console::before,
+  .panel::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(34, 211, 238, .04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34, 211, 238, .04) 1px, transparent 1px);
+    background-size: 34px 34px;
+    opacity: .36;
+    pointer-events: none;
+  }
+  .hero-console { display: grid; grid-template-columns: 96px minmax(0, 1fr) 212px; gap: 10px; align-items: center; min-height: 0; height: 100%; margin-bottom: 0; padding: 10px; border-radius: 12px; }
+  .health-orbit { position: relative; z-index: 1; display: grid; place-items: center; }
+  .orbit-ring {
+    --score: 0;
+    --health: #22d3ee;
+    width: 88px;
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at center, rgba(2, 6, 23, .96) 55%, transparent 56%),
+      conic-gradient(var(--health) calc(var(--score) * 1%), rgba(148, 163, 184, .16) 0);
+    box-shadow: 0 0 34px color-mix(in srgb, var(--health) 28%, transparent), inset 0 0 22px rgba(255,255,255,.04);
+  }
+  .orbit-ring strong { margin-top: 10px; font-family: var(--theme-font-family-mono); font-size: 26px; line-height: 1; }
+  .orbit-ring span { margin-top: -27px; color: var(--text-secondary); font-size: 10px; font-weight: 800; }
+  .hero-main { position: relative; z-index: 1; min-width: 0; }
+  .hero-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .hero-title h1 { margin: 0; min-width: 160px; font-size: 20px; line-height: 1.08; letter-spacing: 0; color: #f8fafc; }
+  .hero-title p { flex: 1 1 420px; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 11px; }
+  .status-pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 999px; border: 1px solid rgba(148, 163, 184, .18); color: var(--text-secondary); background: rgba(15, 23, 42, .62); font-size: 11px; font-weight: 800; }
+  .status-pill i { width: 7px; height: 7px; border-radius: 50%; background: #64748b; }
+  .status-pill.online { color: #67e8f9; border-color: rgba(34, 211, 238, .28); }
+  .status-pill.online i { background: #22d3ee; box-shadow: 0 0 14px rgba(34,211,238,.75); animation: pulse 1.5s ease-in-out infinite; }
+  .hero-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+  .kpi-card {
+    min-width: 0;
+    padding: 7px 8px;
+    border: 1px solid rgba(148, 163, 184, .14);
+    border-radius: 9px;
+    background: rgba(15, 23, 42, .58);
+    color: inherit;
+    text-align: left;
+  }
+  .kpi-card span,
+  .kpi-card em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; font-style: normal; }
+  .kpi-card strong { display: block; margin: 3px 0 2px; font-family: var(--theme-font-family-mono); font-size: 18px; line-height: 1; color: #e2e8f0; }
+  .kpi-card.good strong { color: #34d399; }
+  .kpi-card.bad strong { color: #fb7185; }
+  .kpi-card.load[data-level="warning"] strong { color: #fbbf24; }
+  .kpi-card.load[data-level="critical"] strong { color: #fb7185; }
+  .hero-side { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .meta-line { display: grid; grid-template-columns: 68px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 22px; padding: 0 8px; border-radius: 7px; background: rgba(2, 6, 23, .38); border: 1px solid rgba(148, 163, 184, .1); }
+  .meta-line span { color: var(--text-tertiary); font-size: 10px; }
+  .meta-line strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e2e8f0; font-family: var(--theme-font-family-mono); font-size: 11px; }
+  .refresh-select { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; padding: 3px; border-radius: 8px; background: rgba(2, 6, 23, .5); border: 1px solid rgba(148, 163, 184, .12); }
+  .refresh-opt { min-height: 21px; border: none; border-radius: 6px; background: transparent; color: var(--text-tertiary); font-size: 10px; font-weight: 800; }
+  .refresh-opt.active { background: rgba(34, 211, 238, .13); color: #67e8f9; box-shadow: inset 0 0 18px rgba(34,211,238,.08); }
+  .quick-run-section { position: relative; z-index: 60; overflow: visible; min-height: 0; padding: 8px 10px; margin-bottom: 0; border-radius: 10px; }
+  .qr-header { position: relative; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+  .qr-header h2 { margin: 0; color: #e2e8f0; font-size: 13px; line-height: 1; }
+  .qr-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; }
+  .qr-controls { position: relative; z-index: 70; display: grid; grid-template-columns: minmax(0, 1fr) 132px; gap: 8px; align-items: center; }
+  .qr-select-wrap { position: relative; z-index: 80; min-width: 0; }
+  .qr-select-btn { width: 100%; min-height: 32px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 0 11px; border: 1px solid rgba(34,211,238,.18); border-radius: 8px; background: rgba(2, 6, 23, .44); color: var(--text-primary); font-size: 12px; text-align: left; }
+  .qr-select-btn span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qr-select-arrow { color: #67e8f9; font-size: 10px; }
+  .qr-dropdown { position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 220; overflow: hidden; border: 1px solid rgba(34, 211, 238, .28); border-radius: 9px; background: rgba(4, 9, 21, .98); box-shadow: 0 22px 60px rgba(0,0,0,.42), 0 0 42px rgba(34,211,238,.12); }
+  .qr-dropdown-search { width: 100%; box-sizing: border-box; padding: 10px 12px; border: none; border-bottom: 1px solid rgba(148,163,184,.14); outline: none; background: rgba(15, 23, 42, .9); color: var(--text-primary); font-size: 12px; }
+  .qr-dropdown-list { max-height: 308px; overflow-y: auto; }
+  .qr-dropdown-item { display: grid; grid-template-columns: 42px 42px 38px minmax(0, 1fr); align-items: center; gap: 8px; width: 100%; min-height: 48px; padding: 7px 10px; border: none; border-bottom: 1px solid rgba(148,163,184,.08); background: transparent; color: var(--text-primary); text-align: left; }
+  .qr-dropdown-item:hover,
+  .qr-dropdown-item.item-active { background: rgba(34,211,238,.09); }
+  .qr-item-number,
+  .qr-item-type,
+  .qr-item-icon { display: inline-grid; place-items: center; height: 24px; border-radius: 7px; font-family: var(--theme-font-family-mono); font-size: 10px; font-weight: 900; }
+  .qr-item-number { color: #67e8f9; border: 1px solid rgba(34,211,238,.26); background: rgba(34,211,238,.08); }
+  .qr-item-type { color: #93c5fd; border: 1px solid rgba(96,165,250,.24); background: rgba(96,165,250,.1); }
+  .qr-item-type.check-type { color: #34d399; border-color: rgba(52,211,153,.24); background: rgba(52,211,153,.1); }
+  .qr-item-icon { color: #c4b5fd; border: 1px solid rgba(167,139,250,.22); background: rgba(167,139,250,.1); }
+  .qr-item-info { min-width: 0; }
+  .qr-item-name,
+  .qr-item-id,
+  .qr-item-desc { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qr-item-name { color: #f8fafc; font-size: 12px; font-weight: 800; }
+  .qr-item-id { color: var(--text-tertiary); font-family: var(--theme-font-family-mono); font-size: 10px; }
+  .qr-item-desc { margin-top: 1px; color: var(--text-secondary); font-size: 10px; }
   .qr-empty { padding: 18px 12px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
-  .qr-start { background: #3b82f6; color: white; }
-  .qr-start:hover { background: #2563eb; }
-  .qr-start:disabled { opacity: 0.5; cursor: not-allowed; }
-  .main-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 360px); gap: 12px; }
-  .left-col, .right-col { display: flex; flex-direction: column; gap: 12px; }
-  .resource-section, .load-section, .sys-info-section, .proc-section { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 10px; padding: 12px; }
-  h3 { font-size: 12px; font-weight: 700; color: var(--text-secondary); margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .load-hint, .proc-hint { font-size: 10px; color: var(--text-tertiary); font-weight: normal; text-transform: none; }
-  .resource-bars { display: flex; flex-direction: column; gap: 8px; }
-  .res-header { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-bottom: 3px; }
-  .res-bar { height: 5px; background: var(--bg-secondary); border-radius: 3px; overflow: hidden; }
-  .res-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
-  .res-detail { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
-  .trend-card { position: relative; overflow: hidden; background: linear-gradient(180deg, rgba(17, 24, 39, .96), rgba(8, 13, 24, .98)); border-color: rgba(34, 211, 238, .14); }
-  .trend-card::before { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at 20% 0%, rgba(34,211,238,.14), transparent 34%), radial-gradient(circle at 90% 20%, rgba(167,139,250,.12), transparent 30%); pointer-events: none; }
-  .trend-head { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-  .trend-head h3 { margin: 0; }
-  .trend-values { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .qr-btn { min-height: 32px; border: none; border-radius: 8px; font-size: 12px; font-weight: 900; }
+  .qr-start { background: linear-gradient(135deg, #06b6d4, #2563eb 62%, #7c3aed); color: white; box-shadow: 0 12px 28px rgba(37,99,235,.24); }
+  .qr-start:disabled { opacity: .48; }
+  .dense-grid {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    min-height: 0;
+    height: 100%;
+    grid-template-columns: minmax(218px, .72fr) minmax(0, 1.58fr) minmax(248px, .82fr);
+    grid-template-areas:
+      "system trend resource"
+      "proc proc io";
+    grid-template-rows: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: stretch;
+    overflow: hidden;
+  }
+  .panel { min-height: 0; border-radius: 10px; padding: 10px; }
+  .panel > * { position: relative; z-index: 1; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+  h3 { margin: 0; color: #cbd5e1; font-size: 11px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; }
+  .panel-head span,
+  .load-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+  .panel-link { min-height: 24px; padding: 0 8px; border: 1px solid rgba(34,211,238,.2); border-radius: 7px; background: rgba(34,211,238,.08); color: #67e8f9; font-size: 10px; font-weight: 900; }
+  .resource-panel { grid-area: resource; min-height: 0; display: flex; flex-direction: column; }
+  .resource-matrix { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .resource-matrix { flex: 1; min-height: 0; align-content: stretch; }
+  .resource-tile { min-width: 0; min-height: 0; padding: 7px; border: 1px solid rgba(148,163,184,.12); border-radius: 9px; background: rgba(2, 6, 23, .38); }
+  .tile-top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+  .tile-top span { flex: 0 0 auto; color: var(--text-secondary); font-size: 11px; font-weight: 800; white-space: nowrap; }
+  .tile-top strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; font-family: var(--theme-font-family-mono); font-size: 15px; }
+  .resource-tile em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 5px; color: var(--text-tertiary); font-size: 10px; font-style: normal; }
+  .res-bar { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(148,163,184,.14); }
+  .res-fill { height: 100%; border-radius: inherit; transition: width .5s ease; box-shadow: 0 0 16px currentColor; }
+  .trend-card { grid-area: trend; min-height: 0; display: flex; flex-direction: column; background: linear-gradient(180deg, rgba(7, 12, 25, .98), rgba(4, 9, 20, .97)); }
+  .trend-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; margin-bottom: 8px; }
+  .trend-values { min-width: 0; display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 5px; overflow: hidden; }
   .trend-range { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, .14); background: rgba(15, 23, 42, .62); }
-  .trend-range button { min-height: 24px; padding: 0 8px; border: none; border-radius: 6px; background: transparent; color: var(--text-tertiary); font-size: 10px; font-weight: 800; cursor: pointer; }
-  .trend-range button:hover { color: var(--text-primary); background: rgba(148, 163, 184, .08); }
-  .trend-range button.active { color: #67e8f9; background: rgba(34, 211, 238, .12); box-shadow: inset 0 0 14px rgba(34, 211, 238, .08); }
-  .trend-range button:disabled { opacity: .7; cursor: wait; }
-  .trend-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 999px; border: 1px solid rgba(148, 163, 184, .16); background: rgba(15, 23, 42, .55); color: var(--text-secondary); font-family: var(--theme-font-family-mono); font-size: 10px; font-weight: 800; white-space: nowrap; }
+  .trend-range button { min-height: 23px; padding: 0 7px; border: none; border-radius: 6px; background: transparent; color: var(--text-tertiary); font-size: 10px; font-weight: 900; }
+  .trend-range button.active { color: #67e8f9; background: rgba(34, 211, 238, .12); }
+  .trend-chip { min-width: 0; display: inline-flex; align-items: center; gap: 4px; max-width: 150px; padding: 4px 7px; border-radius: 999px; border: 1px solid rgba(148, 163, 184, .16); background: rgba(15, 23, 42, .55); color: var(--text-secondary); font-family: var(--theme-font-family-mono); font-size: 10px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: opacity .16s ease, filter .16s ease, background .16s ease; }
   .trend-chip.cpu { color: #67e8f9; border-color: rgba(34,211,238,.28); }
   .trend-chip.mem { color: #c4b5fd; border-color: rgba(167,139,250,.28); }
   .trend-chip.load { color: #fbbf24; border-color: rgba(245,158,11,.28); }
   .trend-chip.rx { color: #34d399; border-color: rgba(52,211,153,.28); }
   .trend-chip.tx { color: #60a5fa; border-color: rgba(96,165,250,.28); }
-  .trend-chip.total { color: var(--text-primary); }
-  .trend-chart { position: relative; z-index: 1; height: 168px; padding: 8px; border: 1px solid rgba(148, 163, 184, .12); border-radius: 10px; background: linear-gradient(180deg, rgba(2, 6, 23, .46), rgba(15, 23, 42, .26)); box-shadow: inset 0 0 28px rgba(34, 211, 238, .04); }
+  .trend-chip.muted { opacity: .42; filter: grayscale(.7); background: rgba(15, 23, 42, .28); border-color: rgba(100, 116, 139, .18); }
+  .trend-chart { position: relative; flex: 1; min-height: 0; padding: 8px; border: 1px solid rgba(148, 163, 184, .12); border-radius: 10px; background: linear-gradient(180deg, rgba(2, 6, 23, .56), rgba(15, 23, 42, .24)); box-shadow: inset 0 0 34px rgba(34, 211, 238, .05); }
   .trend-chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
-  .trend-loading { position: absolute; inset: 8px; display: grid; place-items: center; gap: 8px; border-radius: 8px; background: rgba(2, 6, 23, .58); backdrop-filter: blur(2px); color: #67e8f9; font-size: 11px; font-weight: 800; pointer-events: none; }
+  .trend-loading { position: absolute; inset: 8px; display: grid; place-items: center; gap: 8px; border-radius: 8px; background: rgba(2, 6, 23, .58); backdrop-filter: blur(2px); color: #67e8f9; font-size: 11px; font-weight: 900; pointer-events: none; }
   .trend-loading span { width: 28px; height: 28px; border-radius: 50%; border: 2px solid rgba(34, 211, 238, .18); border-top-color: #22d3ee; box-shadow: 0 0 24px rgba(34,211,238,.18); animation: spin .8s linear infinite; }
   .trend-loading em { font-style: normal; font-family: var(--theme-font-family-mono); }
   .trend-tooltip { position: absolute; z-index: 6; min-width: 124px; pointer-events: none; transform: translate(-50%, calc(-100% - 12px)); padding: 9px 10px; border-radius: 9px; border: 1px solid rgba(34, 211, 238, .28); background: rgba(3, 7, 18, .94); color: #e2e8f0; box-shadow: 0 16px 36px rgba(0,0,0,.38), 0 0 28px rgba(34,211,238,.12); font-family: var(--theme-font-family-mono); }
-  .trend-tooltip::after { content: ''; position: absolute; left: 50%; bottom: -7px; width: 10px; height: 10px; transform: translateX(-50%) rotate(45deg); background: rgba(3, 7, 18, .94); border-right: 1px solid rgba(34, 211, 238, .22); border-bottom: 1px solid rgba(34, 211, 238, .22); }
   .trend-tooltip strong { display: block; margin-bottom: 5px; color: #67e8f9; font-size: 11px; }
   .trend-tooltip span { display: block; margin-top: 3px; color: #cbd5e1; font-size: 11px; }
   .trend-axis { position: absolute; left: 10px; right: 10px; bottom: 6px; display: flex; justify-content: space-between; color: var(--text-tertiary); font-family: var(--theme-font-family-mono); font-size: 9px; pointer-events: none; }
@@ -864,52 +1135,53 @@
   .load-line { stroke: url(#trendLoad); color: #f59e0b; }
   .rx-line { stroke: url(#trendRx); color: #34d399; stroke-dasharray: 7 5; }
   .tx-line { stroke: url(#trendTx); color: #60a5fa; stroke-dasharray: 7 5; }
-  .info-rows { display: flex; flex-direction: column; gap: 4px; }
-  .info-row { display: flex; justify-content: space-between; font-size: 11px; }
-  .info-row span:first-child { color: var(--text-tertiary); }
-  .info-row span:last-child { color: var(--text-primary); font-family: var(--theme-font-family-mono); }
-  .ip-value { color: #3b82f6 !important; font-weight: 600; }
-  .proc-section { height: 392px; min-height: 392px; display: flex; flex-direction: column; }
-  .proc-table { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
-  .proc-more-btn { width: 100%; padding: 8px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-secondary); font-size: 11px; cursor: pointer; margin-top: 8px; }
-  .proc-more-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
-  @media (min-width: 1440px) {
-    .main-grid { grid-template-columns: minmax(0, 1fr) minmax(380px, 440px); align-items: stretch; }
-    .left-col, .right-col { min-height: calc(100vh - 246px); }
-    .trend-card { flex: 1; min-height: 360px; display: flex; flex-direction: column; }
-    .trend-chart { flex: 1; min-height: 300px; height: auto; }
-    .proc-section { flex: 1; height: auto; min-height: 420px; }
-    .proc-table { min-height: 0; }
-  }
-  @media (min-width: 1800px) {
-    .trend-card { min-height: 440px; }
-    .trend-chart { min-height: 372px; }
-    .proc-section { min-height: 500px; }
-  }
+  .system-panel { grid-area: system; min-height: 0; display: flex; flex-direction: column; }
+  .info-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 5px; }
+  .info-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 22px; padding: 0 7px; border-radius: 7px; background: rgba(2, 6, 23, .34); border: 1px solid rgba(148,163,184,.08); }
+  .info-row span { color: var(--text-tertiary); font-size: 10px; }
+  .info-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-family: var(--theme-font-family-mono); font-size: 11px; font-weight: 800; }
+  .ip-value { color: #67e8f9 !important; }
+  .proc-section { grid-area: proc; min-height: 0; display: flex; flex-direction: column; }
+  .proc-table { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-x: auto; overflow-y: hidden; }
+  .proc-header,
+  .proc-row { display: grid; grid-template-columns: 28px minmax(86px, .72fr) minmax(190px, 1.45fr) minmax(82px, .62fr) 58px 78px; align-items: center; gap: 7px; min-width: 650px; }
+  .proc-header { flex: 0 0 auto; padding: 5px 0 6px; border-bottom: 1px solid rgba(148,163,184,.14); color: var(--text-tertiary); font-size: 10px; font-weight: 900; text-transform: uppercase; }
+  .proc-sort { border: none; background: transparent; color: inherit; font: inherit; padding: 0; text-align: left; }
+  .proc-list { flex: 1; min-height: 0; min-width: 650px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
+  .proc-row { min-height: 23px; padding: 3px 0; border-bottom: 1px solid rgba(148,163,184,.07); font-size: 11px; }
+  .proc-row:hover { background: rgba(34,211,238,.06); }
+  .proc-row.proc-warning { background: rgba(245,158,11,.06); }
+  .proc-row.proc-critical { background: rgba(239,68,68,.07); }
+  .proc-col-rank { color: var(--text-tertiary); font-family: var(--theme-font-family-mono); }
+  .proc-col-name,
+  .proc-col-path,
+  .proc-col-ports { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proc-col-name { color: var(--text-primary); font-weight: 800; }
+  .proc-col-path { color: var(--text-secondary); font-family: var(--theme-font-family-mono); font-size: 10px; }
+  .proc-col-ports { color: #67e8f9; font-family: var(--theme-font-family-mono); font-size: 10px; font-weight: 800; }
+  .proc-col-cpu,
+  .proc-col-mem { font-family: var(--theme-font-family-mono); font-weight: 800; }
+  .proc-col-mem { color: var(--text-secondary); }
+  .io-panel { grid-area: io; min-height: 0; display: flex; flex-direction: column; }
+  .split-lists { flex: 1; min-height: 0; display: grid; grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .mini-list { min-height: 0; height: 100%; max-height: none; overflow-y: auto; padding-right: 3px; }
+  .mini-row { display: grid; align-items: center; gap: 7px; min-height: 24px; padding: 4px 6px; border-bottom: 1px solid rgba(148,163,184,.08); border-radius: 6px; background: rgba(2, 6, 23, .22); }
+  .mini-row { grid-template-columns: minmax(62px, .72fr) minmax(68px, .6fr) minmax(108px, 1fr); }
+  .mini-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 11px; font-weight: 800; }
+  .mini-row span small { margin-left: 5px; color: var(--text-tertiary); font-size: 9px; font-weight: 700; }
+  .mini-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e2e8f0; font-family: var(--theme-font-family-mono); font-size: 11px; }
+  .mini-row em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: 10px; font-style: normal; }
+  .empty-row { padding: 18px 8px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: flex; align-items: center; justify-content: center; }
   .modal { width: 500px; max-width: 90vw; max-height: 80vh; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }
   .modal-xl { width: 95vw; max-width: 1200px; height: 85vh; }
   .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border-primary); }
-  .modal-header h3 { margin: 0; font-size: 15px; color: var(--text-primary); }
-  .modal-close { background: none; border: none; color: var(--text-tertiary); font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  .modal-header h3 { margin: 0; font-size: 15px; color: var(--text-primary); letter-spacing: 0; text-transform: none; }
+  .modal-close { background: none; border: none; color: var(--text-tertiary); font-size: 18px; padding: 4px 8px; border-radius: 6px; }
   .modal-close:hover { background: var(--bg-hover); }
-  .proc-table { width: 100%; }
-  .proc-header { display: grid; grid-template-columns: 40px minmax(140px, 1fr) 80px 100px; gap: 8px; min-width: 380px; padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; flex: 0 0 auto; }
-  .proc-sort { border: none; background: transparent; color: inherit; font: inherit; text-transform: inherit; padding: 0; text-align: left; cursor: pointer; }
-  .proc-sort:hover { color: var(--text-primary); }
-  .proc-list { flex: 1; min-height: 0; min-width: 380px; overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
-  .proc-row { display: grid; grid-template-columns: 40px minmax(140px, 1fr) 80px 100px; align-items: center; gap: 8px; min-width: 380px; min-height: 30px; padding: 6px 0; border-bottom: 1px solid var(--border-secondary); font-size: 12px; }
-  .proc-row:hover { background: var(--bg-hover); }
-  .proc-row.proc-warning { background: rgba(245,158,11,0.05); }
-  .proc-row.proc-critical { background: rgba(239,68,68,0.05); }
-  .proc-col-rank { color: var(--text-tertiary); font-family: var(--theme-font-family-mono); }
-  .proc-col-name { color: var(--text-primary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .proc-col-cpu { font-weight: 600; font-family: var(--theme-font-family-mono); }
-  .proc-col-mem { color: var(--text-secondary); font-family: var(--theme-font-family-mono); }
   .process-table { width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
   .process-header { display: grid; grid-template-columns: 40px 80px 140px minmax(360px, 1fr) 80px 100px 80px; gap: 8px; min-width: 900px; padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; }
-  .process-sort { border: none; background: transparent; color: inherit; font: inherit; text-transform: inherit; padding: 0; text-align: left; cursor: pointer; }
-  .process-sort:hover { color: var(--text-primary); }
+  .process-sort { border: none; background: transparent; color: inherit; font: inherit; text-transform: inherit; padding: 0; text-align: left; }
   .process-list { max-height: 60vh; overflow-y: auto; min-width: 900px; }
   .process-row { display: grid; grid-template-columns: 40px 80px 140px minmax(360px, 1fr) 80px 100px 80px; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-secondary); font-size: 12px; }
   .process-row:hover { background: var(--bg-hover); }
@@ -923,17 +1195,83 @@
   .col-mem { color: var(--text-secondary); font-family: var(--theme-font-family-mono); }
   .col-status { font-size: 11px; color: var(--text-tertiary); }
   .modal-actions { display: flex; align-items: center; gap: 8px; }
-  .modal-refresh { display: flex; align-items: center; gap: 4px; padding: 4px 10px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+  .modal-refresh { display: flex; align-items: center; gap: 4px; padding: 4px 10px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 6px; color: var(--text-secondary); font-size: 12px; }
   .modal-refresh:hover { background: var(--bg-hover); color: var(--text-primary); }
   .modal-body { flex: 1; overflow-y: auto; padding: 12px; }
   .stat-list-head { display: grid; grid-template-columns: 1fr 92px 42px; gap: 10px; padding: 0 10px 6px; color: var(--text-tertiary); font-size: 11px; }
-  .stat-list-head button { border: none; background: transparent; color: inherit; font: inherit; padding: 0; text-align: left; cursor: pointer; }
-  .stat-list-head button:hover { color: var(--text-primary); }
+  .stat-list-head button { border: none; background: transparent; color: inherit; font: inherit; padding: 0; text-align: left; }
   .stat-list { display: flex; flex-direction: column; gap: 4px; }
   .stat-list-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg-secondary); border-radius: 6px; }
   .stat-list-name { flex: 1; font-size: 13px; color: var(--text-primary); }
   .stat-list-time { font-size: 11px; color: var(--text-tertiary); }
   .stat-list-badge { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
+  @keyframes pulse { 0%, 100% { opacity: .75; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.18); } }
+  @media (min-width: 1440px) {
+    .dashboard { grid-template-rows: minmax(118px, .66fr) minmax(66px, auto) minmax(0, 5fr); gap: 10px; }
+    .hero-console { grid-template-columns: 104px minmax(0, 1fr) 232px; padding: 12px; }
+    .orbit-ring { width: 96px; }
+    .dense-grid { grid-template-columns: minmax(260px, .76fr) minmax(0, 1.48fr) minmax(300px, .9fr); grid-template-rows: minmax(0, 1.05fr) minmax(0, 1fr); gap: 10px; }
+  }
+  @media (min-width: 1800px) {
+    .dashboard { grid-template-rows: minmax(128px, .68fr) minmax(68px, auto) minmax(0, 5.2fr); gap: 12px; }
+    .hero-console { grid-template-columns: 112px minmax(0, 1fr) 256px; }
+    .orbit-ring { width: 104px; }
+    .dense-grid { grid-template-columns: minmax(300px, .8fr) minmax(0, 1.48fr) minmax(360px, .92fr); }
+  }
+  @media (max-width: 1420px) {
+    .dashboard { grid-template-rows: minmax(106px, .58fr) minmax(64px, auto) minmax(0, 5fr); gap: 7px; }
+    .hero-console { grid-template-columns: 88px minmax(0, 1fr) 198px; gap: 8px; padding: 9px; }
+    .orbit-ring { width: 82px; }
+    .hero-title { margin-bottom: 7px; }
+    .hero-title h1 { font-size: 18px; min-width: 140px; }
+    .hero-title p { flex-basis: 260px; }
+    .status-pill { height: 22px; padding: 0 8px; }
+    .hero-kpis { gap: 6px; }
+    .kpi-card { padding: 6px 7px; }
+    .kpi-card strong { font-size: 17px; }
+    .meta-line { min-height: 20px; }
+    .refresh-opt { min-height: 20px; }
+    .dense-grid {
+      grid-template-columns: minmax(204px, .68fr) minmax(0, 1.5fr) minmax(230px, .82fr);
+      grid-template-areas:
+        "system trend resource"
+        "proc proc io";
+      grid-template-rows: minmax(0, 1fr) minmax(0, .96fr);
+      gap: 8px;
+    }
+    .panel { padding: 9px; }
+    .panel-head { margin-bottom: 7px; }
+    .resource-matrix { gap: 6px; }
+    .resource-tile { padding: 6px; }
+    .tile-top strong { font-size: 13px; }
+    .info-rows { gap: 4px; }
+    .info-row { min-height: 20px; }
+    .proc-header,
+    .proc-row { grid-template-columns: 26px minmax(76px, .7fr) minmax(160px, 1.4fr) minmax(72px, .58fr) 54px 70px; gap: 6px; min-width: 580px; }
+    .proc-list { min-width: 580px; }
+    .mini-row { grid-template-columns: minmax(56px, .72fr) minmax(58px, .58fr) minmax(88px, 1fr); gap: 6px; }
+  }
+  @media (max-width: 760px) {
+    .dashboard { height: auto; min-height: 100%; overflow-y: auto; display: block; }
+    .hero-console,
+    .quick-run-section,
+    .dense-grid { margin-bottom: 10px; }
+    .hero-console,
+    .dense-grid,
+    .split-lists,
+    .hero-side { grid-template-columns: 1fr; }
+    .dense-grid {
+      grid-template-areas:
+        "trend"
+        "system"
+        "resource"
+        "proc"
+        "io";
+    }
+    .hero-kpis,
+    .resource-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .qr-controls { grid-template-columns: 1fr; }
+    .trend-card, .io-panel { grid-column: auto; }
+  }
 </style>

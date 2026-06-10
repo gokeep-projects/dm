@@ -6,13 +6,14 @@ mod config;
 mod dashboard;
 mod db;
 mod docs;
+mod java_analyzer;
 mod maintenance;
 mod script;
 mod web;
 
 use clap::{CommandFactory, Parser};
 use cli::util::status_label;
-use cli::{CheckConfigAction, Cli, Commands};
+use cli::{CheckConfigAction, Cli, Commands, JavaAction};
 use colored::*;
 
 #[tokio::main]
@@ -53,6 +54,24 @@ async fn main() {
         Some(Commands::Version) => cli::version::execute(),
         Some(Commands::Maintenance { action }) => cli::maintenance::execute(action),
         Some(Commands::Docs { action }) => cli::docs_cmd::execute(action),
+        Some(Commands::Java { action }) => match action {
+            JavaAction::List { search, json } => cli::java::list(search.as_deref(), json),
+            JavaAction::Analyze {
+                pid,
+                samples,
+                interval_ms,
+                no_histogram,
+                json,
+            } => cli::java::analyze(pid, samples, interval_ms, !no_histogram, json),
+            JavaAction::Export {
+                pid,
+                samples,
+                interval_ms,
+                no_histogram,
+                format,
+                output,
+            } => cli::java::export(pid, samples, interval_ms, !no_histogram, format, output),
+        },
         Some(Commands::Check { check_id, json }) => cli::check::execute(&check_id, json),
         Some(Commands::CheckExport { output, json }) => cli::check::export_all(output, json),
         Some(Commands::CheckConfig { action }) => match action {

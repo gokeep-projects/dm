@@ -58,6 +58,40 @@ pub fn system_environment() -> HashMap<String, String> {
     envs
 }
 
+pub fn parameter_environment(params: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut envs = HashMap::new();
+    if params.is_empty() {
+        return envs;
+    }
+    for (key, value) in params {
+        let name = normalize_env_key(key);
+        if name.is_empty() {
+            continue;
+        }
+        envs.insert(format!("DM_PARAM_{}", name), value.clone());
+        envs.insert(format!("PARAM_{}", name), value.clone());
+    }
+    if let Ok(raw) = serde_json::to_string(params) {
+        envs.insert("DM_SCRIPT_PARAMS_JSON".to_string(), raw);
+    }
+    envs
+}
+
+fn normalize_env_key(key: &str) -> String {
+    let mut out = String::new();
+    for c in key.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_uppercase());
+        } else if c == '_' || c == '-' || c == '.' {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_string()
+}
+
 fn merge_env_file(envs: &mut HashMap<String, String>, path: &str) {
     let Ok(content) = fs::read_to_string(path) else {
         return;
@@ -259,7 +293,7 @@ async fn run_script(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_interpreter, system_environment};
+    use super::{parameter_environment, resolve_interpreter, system_environment};
     use std::path::Path;
 
     #[test]
@@ -285,5 +319,23 @@ mod tests {
     fn system_environment_always_contains_path() {
         let envs = system_environment();
         assert!(envs.get("PATH").is_some_and(|value| !value.is_empty()));
+    }
+
+    #[test]
+    fn parameter_environment_exports_shell_friendly_names() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("service-name".to_string(), "nginx".to_string());
+        params.insert("dry_run".to_string(), "true".to_string());
+
+        let envs = parameter_environment(&params);
+
+        assert_eq!(
+            envs.get("DM_PARAM_SERVICE_NAME").map(String::as_str),
+            Some("nginx")
+        );
+        assert_eq!(envs.get("PARAM_DRY_RUN").map(String::as_str), Some("true"));
+        assert!(envs
+            .get("DM_SCRIPT_PARAMS_JSON")
+            .is_some_and(|raw| raw.contains("service-name")));
     }
 }

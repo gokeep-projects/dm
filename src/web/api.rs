@@ -1,11 +1,14 @@
 use axum::{
+    body::Body,
     extract::{Multipart, Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
+    response::Response,
     Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
 
 use crate::config::Config;
 use crate::db::{AlertRecord, Database, ExecRecord};
@@ -97,6 +100,8 @@ pub struct AppState {
     pub db: Database,
     pub alert_cache: Arc<RwLock<AlertCache>>,
     pub health_tasks: Arc<RwLock<HashMap<String, HealthTaskState>>>,
+    pub java_cancel_tokens: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
+    pub java_cancelled_keys: Arc<RwLock<HashSet<String>>>,
     pub alert_refreshing: Arc<AtomicBool>,
 }
 
@@ -128,7 +133,9 @@ pub struct HealthTaskState {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct RunRequest {
+    #[serde(default)]
     pub params: HashMap<String, String>,
+    #[serde(default)]
     pub args: Vec<String>,
 }
 
@@ -645,12 +652,19 @@ pub async fn traffic_interfaces(State(_state): State<AppState>) -> Json<serde_js
         .networks
         .iter()
         .map(|n| {
+            let class = classify_network_interface(&n.name, &n.ip);
             serde_json::json!({
                 "name": n.name,
                 "ip": n.ip,
                 "mac": n.mac,
                 "received_bytes": n.received_bytes,
                 "transmitted_bytes": n.transmitted_bytes,
+                "kind": class.kind,
+                "kind_label": class.label,
+                "priority": class.priority,
+                "is_public": class.is_public,
+                "is_physical": class.is_physical,
+                "is_virtual": class.is_virtual,
             })
         })
         .collect();
@@ -658,7 +672,18 @@ pub async fn traffic_interfaces(State(_state): State<AppState>) -> Json<serde_js
     interfaces.sort_by(|a, b| {
         let a_name = a["name"].as_str().unwrap_or_default();
         let b_name = b["name"].as_str().unwrap_or_default();
-        a_name.cmp(b_name)
+        let a_priority = a["priority"].as_i64().unwrap_or(99);
+        let b_priority = b["priority"].as_i64().unwrap_or(99);
+        a_priority
+            .cmp(&b_priority)
+            .then_with(|| {
+                b["ip"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+                    .cmp(&a["ip"].as_str().unwrap_or_default().is_empty())
+            })
+            .then_with(|| a_name.cmp(b_name))
     });
 
     Json(serde_json::json!({
@@ -666,6 +691,306 @@ pub async fn traffic_interfaces(State(_state): State<AppState>) -> Json<serde_js
         "capture_supported": cfg!(target_os = "linux"),
         "platform": std::env::consts::OS,
     }))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InterfaceClass {
+    kind: &'static str,
+    label: &'static str,
+    priority: i64,
+    is_public: bool,
+    is_physical: bool,
+    is_virtual: bool,
+}
+
+fn classify_network_interface(name: &str, ip: &str) -> InterfaceClass {
+    let lower = name.to_ascii_lowercase();
+    let is_loopback = is_loopback_interface(&lower, ip);
+    let is_virtual = !is_loopback && is_virtual_interface(&lower);
+    let is_physical = !is_virtual && is_physical_interface(&lower);
+    let is_public = is_public_ip(ip);
+    if is_public {
+        InterfaceClass {
+            kind: "public",
+            label: "公网",
+            priority: 0,
+            is_public,
+            is_physical,
+            is_virtual,
+        }
+    } else if is_physical {
+        InterfaceClass {
+            kind: "physical",
+            label: "物理",
+            priority: 1,
+            is_public,
+            is_physical,
+            is_virtual,
+        }
+    } else if is_loopback {
+        InterfaceClass {
+            kind: "loopback",
+            label: "本地回环",
+            priority: 2,
+            is_public,
+            is_physical: false,
+            is_virtual: false,
+        }
+    } else if is_virtual {
+        InterfaceClass {
+            kind: "virtual",
+            label: "虚拟",
+            priority: 4,
+            is_public,
+            is_physical,
+            is_virtual,
+        }
+    } else {
+        InterfaceClass {
+            kind: "other",
+            label: "其它",
+            priority: 3,
+            is_public,
+            is_physical,
+            is_virtual,
+        }
+    }
+}
+
+fn is_loopback_interface(lower: &str, ip: &str) -> bool {
+    if matches!(lower, "lo" | "lo0" | "loopback") || lower.starts_with("lo:") {
+        return true;
+    }
+    let primary = ip
+        .split(|c| matches!(c, '/' | ',' | ' '))
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    matches!(
+        primary.parse::<IpAddr>(),
+        Ok(IpAddr::V4(v4)) if v4.is_loopback()
+    ) || matches!(
+        primary.parse::<IpAddr>(),
+        Ok(IpAddr::V6(v6)) if v6.is_loopback()
+    )
+}
+
+fn is_virtual_interface(lower: &str) -> bool {
+    lower.starts_with("docker")
+        || lower.starts_with("br-")
+        || lower.starts_with("veth")
+        || lower.starts_with("virbr")
+        || lower.starts_with("tun")
+        || lower.starts_with("tap")
+        || lower.starts_with("wg")
+        || lower.starts_with("tailscale")
+        || lower.starts_with("zt")
+        || lower.starts_with("kube")
+        || lower.starts_with("cni")
+        || lower.starts_with("flannel")
+        || lower.starts_with("calico")
+        || lower.starts_with("vmnet")
+        || lower.contains("virtual")
+}
+
+fn is_physical_interface(lower: &str) -> bool {
+    lower.starts_with("eth")
+        || lower.starts_with("en")
+        || lower.starts_with("ens")
+        || lower.starts_with("eno")
+        || lower.starts_with("enp")
+        || lower.starts_with("em")
+        || lower.starts_with("bond")
+        || lower.starts_with("team")
+        || lower.starts_with("wlan")
+        || lower.starts_with("wl")
+}
+
+fn is_public_ip(ip: &str) -> bool {
+    let primary = ip
+        .split(|c| matches!(c, '/' | ',' | ' '))
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    match primary.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified())
+        }
+        Ok(IpAddr::V6(v6)) => {
+            !(v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || ((v6.segments()[0] & 0xfe00) == 0xfc00)
+                || ((v6.segments()[0] & 0xffc0) == 0xfe80))
+        }
+        Err(_) => false,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JavaProcessQuery {
+    pub q: Option<String>,
+}
+
+pub async fn java_processes(Query(query): Query<JavaProcessQuery>) -> Json<serde_json::Value> {
+    let q = query.q.clone();
+    let processes = tokio::task::spawn_blocking(move || {
+        crate::java_analyzer::list_java_processes(q.as_deref())
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({
+        "processes": processes,
+        "total": processes.len(),
+    }))
+}
+
+pub async fn java_analyze(
+    State(state): State<AppState>,
+    Json(req): Json<crate::java_analyzer::JavaAnalyzeRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let cancel_key = req.cancel_key.clone();
+    let cancel = register_java_cancel_token(&state, cancel_key.as_deref());
+    let cleanup_key = cancel_key.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::java_analyzer::analyze_java_with_cancel(req, cancel)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    unregister_java_cancel_token(&state, cleanup_key.as_deref());
+    let analysis = result.map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(serde_json::to_value(analysis).unwrap_or_default()))
+}
+
+pub async fn java_scan(
+    State(state): State<AppState>,
+    Json(req): Json<crate::java_analyzer::JavaFleetScanRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let cancel_key = req.cancel_key.clone();
+    let cancel = register_java_cancel_token(&state, cancel_key.as_deref());
+    let cleanup_key = cancel_key.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::java_analyzer::scan_java_process_rules(req, cancel)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    unregister_java_cancel_token(&state, cleanup_key.as_deref());
+    let scan = result.map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(serde_json::to_value(scan).unwrap_or_default()))
+}
+
+pub async fn java_hprof(
+    State(state): State<AppState>,
+    Json(req): Json<crate::java_analyzer::JavaHeapDumpRequest>,
+) -> Result<Response<Body>, StatusCode> {
+    let cancel_key = req.cancel_key.clone();
+    let cancel = register_java_cancel_token(&state, cancel_key.as_deref());
+    let cleanup_key = cancel_key.clone();
+    let result =
+        tokio::task::spawn_blocking(move || crate::java_analyzer::dump_java_hprof(req, cancel))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    unregister_java_cancel_token(&state, cleanup_key.as_deref());
+    let dump = result.map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bytes = std::fs::read(&dump.path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = std::fs::remove_file(&dump.path);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", dump.filename),
+        )
+        .header("x-dm-hprof-bytes", dump.bytes.to_string())
+        .header(
+            "x-dm-hprof-message",
+            dump.message.replace(['\r', '\n'], " "),
+        )
+        .body(Body::from(bytes))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub async fn java_cancel(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Json<serde_json::Value> {
+    let before_active = state
+        .java_cancel_tokens
+        .read()
+        .ok()
+        .map(|tokens| tokens.len())
+        .unwrap_or(0);
+    let cancelled = state
+        .java_cancel_tokens
+        .write()
+        .ok()
+        .and_then(|mut tokens| tokens.remove(&key))
+        .map(|token| {
+            token.store(true, Ordering::SeqCst);
+            true
+        })
+        .unwrap_or(false);
+    if !cancelled {
+        if let Ok(mut keys) = state.java_cancelled_keys.write() {
+            keys.insert(key.clone());
+        }
+    }
+    let active = state
+        .java_cancel_tokens
+        .read()
+        .ok()
+        .map(|tokens| tokens.len())
+        .unwrap_or(0);
+    let pending = state
+        .java_cancelled_keys
+        .read()
+        .ok()
+        .map(|keys| keys.len())
+        .unwrap_or(0);
+    Json(serde_json::json!({
+        "status": "ok",
+        "cancelled": cancelled,
+        "pending": !cancelled,
+        "active_before": before_active,
+        "active": active,
+        "pending_count": pending,
+        "key": key,
+    }))
+}
+
+fn register_java_cancel_token(state: &AppState, key: Option<&str>) -> Option<Arc<AtomicBool>> {
+    let key = key?.trim();
+    if key.is_empty() || key.len() > 160 {
+        return None;
+    }
+    let token = Arc::new(AtomicBool::new(false));
+    if state
+        .java_cancelled_keys
+        .write()
+        .ok()
+        .is_some_and(|mut keys| keys.remove(key))
+    {
+        token.store(true, Ordering::SeqCst);
+    }
+    if let Ok(mut tokens) = state.java_cancel_tokens.write() {
+        tokens.insert(key.to_string(), token.clone());
+    }
+    Some(token)
+}
+
+fn unregister_java_cancel_token(state: &AppState, key: Option<&str>) {
+    let Some(key) = key else {
+        return;
+    };
+    if let Ok(mut tokens) = state.java_cancel_tokens.write() {
+        tokens.remove(key);
+    }
 }
 
 pub async fn clear_history(
@@ -1198,12 +1523,18 @@ pub struct UpdateDocRequest {
     #[serde(default)]
     pub category: String,
     #[serde(default)]
-    pub content: String,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDocDirRequest {
+    pub name: String,
 }
 
 pub async fn list_docs(State(_state): State<AppState>) -> Json<serde_json::Value> {
     let docs = crate::docs::list_docs(None);
-    Json(serde_json::json!({ "docs": docs, "total": docs.len() }))
+    let dirs = crate::docs::list_doc_dirs();
+    Json(serde_json::json!({ "docs": docs, "dirs": dirs, "total": docs.len() }))
 }
 
 pub async fn get_doc_api(
@@ -1231,6 +1562,17 @@ pub async fn create_doc_api(
     match crate::docs::create_doc(&req.id, &req.title, cat, "") {
         Ok(meta) => Ok(Json(serde_json::to_value(meta).unwrap_or_default())),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+pub async fn create_doc_dir_api(
+    State(_state): State<AppState>,
+    Json(req): Json<CreateDocDirRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    validate_non_empty(&req.name, 80)?;
+    match crate::docs::create_doc_dir(&req.name) {
+        Ok(dirs) => Ok(Json(serde_json::json!({ "status": "ok", "dirs": dirs }))),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
     }
 }
 
@@ -1309,11 +1651,7 @@ pub async fn update_doc_api(
     } else {
         Some(req.category.as_str())
     };
-    let content_opt = if req.content.is_empty() {
-        None
-    } else {
-        Some(req.content.as_str())
-    };
+    let content_opt = req.content.as_deref();
     match crate::docs::update_doc(&id, title_opt, cat_opt, None, content_opt) {
         Ok(meta) => Ok(Json(serde_json::to_value(meta).unwrap_or_default())),
         Err(_) => Err(StatusCode::NOT_FOUND),
@@ -4343,16 +4681,22 @@ pub async fn check_service_health(
                 .collect()
         })
         .unwrap_or_default();
+    let has_query_pid = query.pid.is_some_and(|pid| pid > 0);
     if let Some(pid) = query.pid {
         if pid > 0 {
             pid_values.push(pid.to_string());
         }
     }
-    let pid_output = std::process::Command::new("pgrep")
-        .args(["-f", &process_name])
-        .output();
+    let pid_output = if has_query_pid {
+        None
+    } else {
+        std::process::Command::new("pgrep")
+            .args(["-f", &process_name])
+            .output()
+            .ok()
+    };
 
-    if let Ok(output) = pid_output {
+    if let Some(output) = pid_output {
         let pids = String::from_utf8_lossy(&output.stdout).trim().to_string();
         pid_values.extend(
             pids.lines()
@@ -4361,6 +4705,11 @@ pub async fn check_service_health(
         );
         pid_values.sort();
         pid_values.dedup();
+        pid_values.retain(|pid| {
+            pid.parse::<u32>()
+                .ok()
+                .is_some_and(|value| std::path::Path::new(&format!("/proc/{value}")).exists())
+        });
         health_info["pids"] = serde_json::json!(pid_values);
         health_info["process_count"] = serde_json::json!(pid_values.len());
         health_info["is_running"] = serde_json::json!(!pid_values.is_empty());
@@ -4403,10 +4752,60 @@ pub async fn check_service_health(
             }
         }
         health_info["processes"] = serde_json::json!(process_rows);
-    } else {
+    } else if pid_values.is_empty() {
         health_info["pids"] = serde_json::json!([]);
         health_info["process_count"] = serde_json::json!(0);
         health_info["is_running"] = serde_json::json!(false);
+    } else {
+        pid_values.sort();
+        pid_values.dedup();
+        pid_values.retain(|pid| {
+            pid.parse::<u32>()
+                .ok()
+                .is_some_and(|value| std::path::Path::new(&format!("/proc/{value}")).exists())
+        });
+        health_info["pids"] = serde_json::json!(pid_values);
+        health_info["process_count"] = serde_json::json!(pid_values.len());
+        health_info["is_running"] = serde_json::json!(!pid_values.is_empty());
+
+        let mut process_rows = Vec::new();
+        for pid in &pid_values {
+            if let Ok(ps) = std::process::Command::new("ps")
+                .args([
+                    "-p",
+                    pid,
+                    "-o",
+                    "pid=,ppid=,%cpu=,%mem=,rss=,etime=,stat=,comm=,args=",
+                ])
+                .output()
+            {
+                let line = String::from_utf8_lossy(&ps.stdout).trim().to_string();
+                if !line.is_empty() {
+                    let mut cols = line.split_whitespace();
+                    let pid_col = cols.next().unwrap_or("");
+                    let ppid = cols.next().unwrap_or("");
+                    let cpu = cols.next().unwrap_or("");
+                    let mem = cols.next().unwrap_or("");
+                    let rss = cols.next().unwrap_or("");
+                    let etime = cols.next().unwrap_or("");
+                    let stat = cols.next().unwrap_or("");
+                    let comm = cols.next().unwrap_or("");
+                    let args = cols.collect::<Vec<_>>().join(" ");
+                    process_rows.push(serde_json::json!({
+                        "pid": pid_col,
+                        "ppid": ppid,
+                        "cpu": cpu,
+                        "memory": mem,
+                        "rss_kb": rss,
+                        "etime": etime,
+                        "stat": stat,
+                        "command": comm,
+                        "args": args,
+                    }));
+                }
+            }
+        }
+        health_info["processes"] = serde_json::json!(process_rows);
     }
 
     let port_output = std::process::Command::new("ss").args(["-tulnp"]).output();
@@ -4441,17 +4840,39 @@ pub async fn check_service_health(
 
     let is_running = health_info["is_running"].as_bool().unwrap_or(false);
     let is_active = health_info["is_active"].as_bool().unwrap_or(false);
+    let systemd_load_state = health_info["systemd_properties"]["LoadState"]
+        .as_str()
+        .unwrap_or_default();
+    let has_systemd_unit = !systemd_load_state.is_empty() && systemd_load_state != "not-found";
+    let list_context_running = query.pid.filter(|pid| *pid > 0).is_some()
+        || query
+            .ports
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty() && v.trim() != "-")
+        || query
+            .path
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty() && v.trim() != "-")
+        || query
+            .category
+            .as_deref()
+            .is_some_and(|v| v.contains("进程") || v.contains("应用") || v.contains("端口"));
     let mut issues = Vec::new();
-    if !is_active {
+    if has_systemd_unit && !is_active && !is_running {
         issues.push("systemd 未处于 active 状态".to_string());
     }
     if !is_running {
         issues.push("未发现关联运行进程".to_string());
     }
-    if health_info["listening_ports"]
+    let missing_port = health_info["listening_ports"]
         .as_array()
         .map(|v| v.is_empty())
-        .unwrap_or(true)
+        .unwrap_or(true);
+    if missing_port
+        && query
+            .ports
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty() && v.trim() != "-")
     {
         issues.push("未发现关联监听端口".to_string());
     }
@@ -4506,11 +4927,42 @@ pub async fn check_service_health(
         ),
     ]);
 
-    if issues.is_empty()
-        || (is_running && is_active && issues.len() == 1 && issues[0].contains("监听端口"))
+    let effective_status = if is_running && (!has_systemd_unit || is_active || list_context_running)
     {
+        "running"
+    } else if is_running {
+        "degraded"
+    } else {
+        "stopped"
+    };
+    let status_source = if has_systemd_unit && is_active {
+        "systemd"
+    } else if is_running {
+        "process"
+    } else {
+        "unknown"
+    };
+    health_info["effective_status"] = serde_json::json!(effective_status);
+    health_info["status_source"] = serde_json::json!(status_source);
+    health_info["systemd_unit_found"] = serde_json::json!(has_systemd_unit);
+
+    if effective_status == "running" {
         health_info["status"] = serde_json::json!("ok");
-        health_info["message"] = serde_json::json!(format!("服务 {} 运行正常", safe_name));
+        let source_label = if status_source == "systemd" {
+            "systemd active"
+        } else {
+            "进程/PID/端口"
+        };
+        health_info["message"] = serde_json::json!(format!(
+            "服务 {} 运行正常，状态来源: {}",
+            safe_name, source_label
+        ));
+    } else if effective_status == "degraded" {
+        health_info["status"] = serde_json::json!("warn");
+        health_info["message"] = serde_json::json!(format!(
+            "服务 {} 进程存在，但 systemd 状态不一致",
+            safe_name
+        ));
     } else {
         health_info["status"] = serde_json::json!("error");
         health_info["message"] = serde_json::json!(format!("服务 {} 未运行", safe_name));
@@ -4718,6 +5170,41 @@ pub async fn get_all_processes(State(_state): State<AppState>) -> Json<serde_jso
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_interface_classification_prefers_public_then_physical_then_virtual() {
+        let public = classify_network_interface("eth0", "8.8.8.8");
+        let physical = classify_network_interface("ens192", "10.0.0.12");
+        let other = classify_network_interface("ib0", "172.16.0.4");
+        let virtual_iface = classify_network_interface("docker0", "172.17.0.1");
+
+        assert_eq!(public.kind, "public");
+        assert_eq!(physical.kind, "physical");
+        assert_eq!(other.kind, "other");
+        assert_eq!(virtual_iface.kind, "virtual");
+        assert!(public.priority < physical.priority);
+        assert!(physical.priority < other.priority);
+        assert!(other.priority < virtual_iface.priority);
+    }
+
+    #[test]
+    fn private_or_loopback_addresses_are_not_public() {
+        assert!(!is_public_ip("10.0.0.1"));
+        assert!(!is_public_ip("172.16.1.10"));
+        assert!(!is_public_ip("192.168.1.10"));
+        assert!(!is_public_ip("127.0.0.1"));
+        assert!(is_public_ip("1.1.1.1/24"));
+    }
+
+    #[test]
+    fn loopback_interface_is_local_loopback_not_virtual() {
+        let loopback = classify_network_interface("lo", "127.0.0.1");
+
+        assert_eq!(loopback.kind, "loopback");
+        assert_eq!(loopback.label, "本地回环");
+        assert!(!loopback.is_virtual);
+        assert!(!loopback.is_public);
+    }
 
     #[test]
     fn rule_import_accepts_template_shape_and_skips_unknown_rules() {

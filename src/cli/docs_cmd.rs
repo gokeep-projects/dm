@@ -3,6 +3,7 @@ use crate::cli::DocsAction;
 use crate::docs;
 use anyhow::Result;
 use colored::*;
+use std::path::Path;
 
 pub fn execute(action: DocsAction) -> Result<()> {
     match action {
@@ -13,6 +14,26 @@ pub fn execute(action: DocsAction) -> Result<()> {
             title,
             category,
         } => create_doc(&doc_id, &title, &category),
+        DocsAction::Mkdir { name } => mkdir_doc_dir(&name),
+        DocsAction::Import {
+            file,
+            id,
+            title,
+            category,
+        } => import_doc(&file, id.as_deref(), title.as_deref(), &category),
+        DocsAction::Update {
+            doc_id,
+            title,
+            category,
+            content,
+            file,
+        } => update_doc(
+            &doc_id,
+            title.as_deref(),
+            category.as_deref(),
+            content.as_deref(),
+            file.as_deref(),
+        ),
         DocsAction::Delete { doc_id } => delete_doc(&doc_id),
     }
 }
@@ -191,6 +212,92 @@ fn create_doc(id: &str, title: &str, category: &str) -> Result<()> {
     Ok(())
 }
 
+fn mkdir_doc_dir(name: &str) -> Result<()> {
+    let dirs = docs::create_doc_dir(name).map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!();
+    println!(
+        "  {} {}",
+        status_label("ok"),
+        format!("文档目录 '{}' 已创建", name).bright_white().bold()
+    );
+    println!(
+        "  {} {}",
+        "-".bright_white(),
+        format!("当前目录: {}", dirs.join(" / ")).dimmed()
+    );
+    println!();
+    Ok(())
+}
+
+fn import_doc(file: &Path, id: Option<&str>, title: Option<&str>, category: &str) -> Result<()> {
+    let content =
+        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("读取导入文件失败: {}", e))?;
+    if content.trim().is_empty() {
+        return Err(anyhow::anyhow!("导入文件内容为空"));
+    }
+    let filename = file
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or("imported-doc");
+    let parsed_title = parse_title(&content)
+        .or_else(|| title.map(|v| v.to_string()))
+        .unwrap_or_else(|| filename.to_string());
+    let doc_title = title.unwrap_or(&parsed_title);
+    let doc_id = id
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| slug(&format!("{}-{}", filename, doc_title)));
+    let body = strip_import_body(&content);
+    let meta = if docs::get_doc(&doc_id).is_some() {
+        docs::update_doc(&doc_id, Some(doc_title), Some(category), None, Some(&body))
+    } else {
+        docs::create_doc(&doc_id, doc_title, category, &body)
+    }
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    println!();
+    println!(
+        "  {} {}",
+        status_label("ok"),
+        "文档已导入".bright_white().bold()
+    );
+    print_doc_meta(&meta);
+    println!();
+    Ok(())
+}
+
+fn update_doc(
+    id: &str,
+    title: Option<&str>,
+    category: Option<&str>,
+    content: Option<&str>,
+    file: Option<&Path>,
+) -> Result<()> {
+    let file_content = match file {
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("读取正文文件失败: {}", e))?,
+        ),
+        None => None,
+    };
+    let body = file_content.as_deref().or(content);
+    if title.is_none() && category.is_none() && body.is_none() {
+        return Err(anyhow::anyhow!(
+            "没有需要更新的内容，请指定 --title、--category、--content 或 --file"
+        ));
+    }
+    let meta =
+        docs::update_doc(id, title, category, None, body).map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!();
+    println!(
+        "  {} {}",
+        status_label("ok"),
+        "文档已更新".bright_white().bold()
+    );
+    print_doc_meta(&meta);
+    println!();
+    Ok(())
+}
+
 fn delete_doc(id: &str) -> Result<()> {
     docs::delete_doc(id).map_err(|e| anyhow::anyhow!("{}", e))?;
     println!();
@@ -201,6 +308,88 @@ fn delete_doc(id: &str) -> Result<()> {
     );
     println!();
     Ok(())
+}
+
+fn print_doc_meta(meta: &docs::DocMeta) {
+    println!(
+        "  {} {} {}",
+        "-".bright_white(),
+        "ID:".dimmed(),
+        meta.id.bright_cyan()
+    );
+    println!(
+        "  {} {} {}",
+        "-".bright_white(),
+        "标题:".dimmed(),
+        meta.title.bright_white()
+    );
+    println!(
+        "  {} {} {}",
+        "-".bright_white(),
+        "目录:".dimmed(),
+        meta.category.dimmed()
+    );
+    println!(
+        "  {} {} {}",
+        "-".bright_white(),
+        "更新:".dimmed(),
+        meta.updated_at.dimmed()
+    );
+}
+
+fn parse_title(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.strip_prefix("# ")
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+    })
+}
+
+fn strip_import_body(content: &str) -> String {
+    let mut skipped_title = false;
+    content
+        .lines()
+        .filter(|line| {
+            if line.starts_with("<!-- ") {
+                return false;
+            }
+            if !skipped_title && line.starts_with("# ") {
+                skipped_title = true;
+                return false;
+            }
+            true
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn slug(value: &str) -> String {
+    let slug: String = value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else if c.is_alphanumeric() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let clean = slug
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if clean.is_empty() {
+        format!("doc-{}", chrono::Local::now().timestamp())
+    } else {
+        clean.chars().take(96).collect()
+    }
 }
 
 fn format_bytes(b: u64) -> String {

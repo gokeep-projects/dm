@@ -9,9 +9,10 @@
   import CheckList from './routes/CheckList.svelte';
   import CheckResult from './routes/CheckResult.svelte';
   import CheckImportReport from './routes/CheckImportReport.svelte';
-  import Knowledge from './routes/Knowledge.svelte';
+  import Docs from './routes/Docs.svelte';
   import ServiceManage from './routes/ServiceManage.svelte';
   import TrafficAnalysis from './routes/TrafficAnalysis.svelte';
+  import JavaAnalyzer from './routes/JavaAnalyzer.svelte';
   import Help from './routes/Help.svelte';
   import Alerts from './routes/Alerts.svelte';
   import Settings from './routes/Settings.svelte';
@@ -30,7 +31,6 @@
   let paletteScripts = $state([]);
   let paletteIdx = $state(0);
   let paletteInput = $state(null);
-  let theme = $state('dark');
   let lang = $state('zh');
   let alertCount = $state(0);
   let showAlerts = $state(false);
@@ -39,12 +39,6 @@
 
   function navigate(target) {
     location.hash = '#/' + target;
-  }
-
-  function toggleTheme() {
-    theme = theme === 'light' ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('dm-theme', theme);
   }
 
   function toggleLang() {
@@ -205,9 +199,7 @@
   }
 
   onMount(() => {
-    const savedTheme = localStorage.getItem('dm-theme') || 'dark';
-    theme = savedTheme;
-    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.setAttribute('data-theme', 'dark');
 
     const savedLang = localStorage.getItem('dm-lang') || 'zh';
     lang = savedLang;
@@ -262,8 +254,9 @@
     { id: 'checks', label: t('nav.checks', lang), icon: 'search' },
     { id: 'services', label: t('nav.services', lang), icon: 'tool' },
     { id: 'traffic', label: '流量分析', icon: 'traffic' },
+    { id: 'java-analyzer', label: '堆栈分析', icon: 'java' },
     { id: 'scripts', label: t('nav.scripts', lang), icon: 'play' },
-    { id: 'knowledge', label: '维护管理', icon: 'book' },
+    { id: 'knowledge', label: '维护文档', icon: 'book' },
     { id: 'alerts', label: '系统告警', icon: 'bell' },
     { id: 'rules', label: '规则引擎', icon: 'rules' },
     { id: 'help', label: t('nav.help', lang), icon: 'help' },
@@ -274,7 +267,7 @@
     if (route === 'script') return '脚本详情';
     if (route === 'check') return '检查结果';
     if (route === 'check-import') return '导入报告';
-    if (route === 'maintenance-detail') return '维护记录';
+    if (route === 'maintenance-detail') return '维护文档';
     if (route === 'doc-detail') return '文档详情';
     return (nav.find(n => n.id === route) || nav[0]).label;
   });
@@ -285,6 +278,7 @@
       search: 'M5 11.5a6.5 6.5 0 1 1 11.1 4.6L21 21M8.5 11.5h7M12 8v7M10 3.7 12 2l2 1.7',
       tool: 'M6 19 19 6M8 21H4v-4l9.5-9.5m3.2-3.2 1.6-1.6 2.7 2.7-1.6 1.6M14 19h6M17 16v6M4 8h6M7 5v6',
       traffic: 'M3 12h3l2-7 4 14 3-9 2 5h4M5 5h4m10 0h-4M5 19h4m10 0h-4M9 5v3m6-3v3M9 16v3m6-3v3',
+      java: 'M7 18c3 1.8 7 1.8 10 0M8 21c2.6 1 5.4 1 8 0M10 4c2 1.8 2 3.2 0 5s-2 3.2 0 5M14 3c2.4 2.2 2.4 4 0 6.2M5 14h14M6 11h12M5 7h5m4 0h5',
       play: 'M6 5.5 19 12 6 18.5v-13Zm3.5 4.3v4.4L14 12 9.5 9.8ZM4 4h3M4 20h3M17 4h3M17 20h3',
       book: 'M5 4h12a2 2 0 0 1 2 2v15H7a3 3 0 0 1-3-3V6a2 2 0 0 1 2-2Zm2 0v14m3-9h5m-5 4h4',
       bell: 'M18 9a6 6 0 0 0-12 0c0 5.2-2.2 7.1-3 8h18c-.8-.9-3-2.8-3-8ZM10 21h4M8 4l-1.5-2M16 4l1.5-2',
@@ -309,7 +303,20 @@
 <div class="app-shell">
   <aside class="sidebar" class:closed={!sidebar}>
     <div class="brand">
-      <div class="logo animate-float">DM</div>
+      <a class="logo animate-float" href="#/dashboard" aria-label="返回仪表盘首页" title="返回仪表盘首页">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <defs>
+            <linearGradient id="dm-logo-line" x1="6" y1="6" x2="42" y2="42">
+              <stop offset="0" stop-color="#67e8f9" />
+              <stop offset=".52" stop-color="#2dd4bf" />
+              <stop offset="1" stop-color="#a78bfa" />
+            </linearGradient>
+          </defs>
+          <path class="logo-ring" d="M24 4 42 14v20L24 44 6 34V14L24 4Z" />
+          <path class="logo-core" d="M16 17.5h8.5c5.1 0 8.5 2.8 8.5 6.5s-3.4 6.5-8.5 6.5H16v-13Zm5.2 3.7v5.6h3.2c2.1 0 3.4-1.1 3.4-2.8s-1.3-2.8-3.4-2.8h-3.2Z" />
+          <path class="logo-circuit" d="M12 12h8M28 12h8M12 36h8M28 36h8M24 4v8M24 36v8" />
+        </svg>
+      </a>
       <div>
         <div class="brand-name">DM 平台</div>
         <div class="brand-ver">运维工具 v2.0</div>
@@ -341,13 +348,6 @@
       </button>
       <h1 class="page-title">{pageTitle}</h1>
       <div class="top-bar-right">
-        <button class="theme-toggle" onclick={toggleTheme} title={theme === 'light' ? '切换到暗黑模式' : '切换到明亮模式'}>
-          {#if theme === 'light'}
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-          {:else}
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          {/if}
-        </button>
         <button class="lang-toggle" onclick={toggleLang} title={lang === 'zh' ? 'Switch to English' : '切换到中文'}>
           {lang === 'zh' ? 'EN' : '中'}
         </button>
@@ -361,7 +361,7 @@
     </header>
     <div class="content-area">
       {#if !transitioning}
-        <div class="route-shell" in:fade={{ duration: 200, delay: 50 }}>
+        <div class="route-shell" class:dashboard-route={route === 'dashboard'} in:fade={{ duration: 200, delay: 50 }}>
           {#if route === 'dashboard'}
             <Dashboard />
           {:else if route === 'checks'}
@@ -375,15 +375,17 @@
           {:else if route === 'script'}
             <ScriptDetail id={sid} {autorun} />
           {:else if route === 'knowledge'}
-            <Knowledge />
+            <Docs />
           {:else if route === 'maintenance-detail'}
-            <Knowledge detailId={sid} detailType="record" />
+            <Docs />
           {:else if route === 'doc-detail'}
-            <Knowledge detailId={sid} detailType="doc" />
+            <Docs detailId={sid} />
           {:else if route === 'services'}
             <ServiceManage />
           {:else if route === 'traffic'}
             <TrafficAnalysis />
+          {:else if route === 'java-analyzer'}
+            <JavaAnalyzer />
           {:else if route === 'alerts'}
             <Alerts />
           {:else if route === 'rules'}
@@ -563,14 +565,50 @@
     height: 42px;
     border-radius: 8px;
     background:
-      linear-gradient(135deg, rgba(34, 211, 238, 0.92), rgba(20, 184, 166, 0.8) 52%, rgba(99, 102, 241, 0.78));
+      radial-gradient(circle at 50% 42%, rgba(103, 232, 249, 0.22), transparent 58%),
+      linear-gradient(145deg, rgba(2, 6, 23, 0.96), rgba(8, 47, 73, 0.78));
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 800;
-    font-size: 15px;
     color: #fff;
-    box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.22), 0 0 28px rgba(34, 211, 238, 0.22);
+    box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.26), 0 0 30px rgba(34, 211, 238, 0.24), inset 0 0 24px rgba(45, 212, 191, 0.08);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .logo::after {
+    content: '';
+    position: absolute;
+    inset: 7px;
+    border-radius: 7px;
+    border: 1px solid rgba(94, 234, 212, 0.22);
+    filter: drop-shadow(0 0 8px rgba(45, 212, 191, 0.35));
+  }
+
+  .logo svg {
+    width: 34px;
+    height: 34px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .logo-ring,
+  .logo-circuit {
+    fill: none;
+    stroke: url(#dm-logo-line);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .logo-core {
+    fill: url(#dm-logo-line);
+    filter: drop-shadow(0 0 8px rgba(103, 232, 249, 0.46));
+  }
+
+  .logo-circuit {
+    stroke-width: 1.5;
+    opacity: 0.9;
   }
 
   .brand-name {
@@ -689,6 +727,7 @@
 
   .main-content {
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -737,7 +776,7 @@
     gap: 12px;
   }
 
-  .theme-toggle, .lang-toggle {
+  .lang-toggle {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -751,7 +790,7 @@
     transition: all var(--transition-fast);
   }
 
-  .theme-toggle:hover, .lang-toggle:hover {
+  .lang-toggle:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
     border-color: var(--border-focus);
@@ -808,6 +847,7 @@
 
   .content-area {
     flex: 1;
+    min-height: 0;
     overflow: auto;
     width: 100%;
     min-width: 0;
@@ -819,6 +859,12 @@
   .route-shell {
     width: 100%;
     min-width: 0;
+    min-height: 0;
+  }
+
+  .route-shell.dashboard-route {
+    height: 100%;
+    overflow: hidden;
   }
 
   @media (max-width: 820px) {

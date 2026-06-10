@@ -6,13 +6,21 @@ pub fn check() -> CheckResult {
     // 汇总检查
     let mut issues = 0;
     let mut warnings = 0;
+    let mut detail_rows: Vec<Vec<String>> = Vec::new();
 
     // 系统检查
     let sys_result = crate::checks::system::check();
     let mut engine_findings = crate::anomaly::evaluate_check_result(&sys_result);
     for section in &sys_result.sections {
         for item in &section.items {
-            count_item_status(item, &mut issues, &mut warnings);
+            count_item_status(
+                "系统检查",
+                &section.title,
+                item,
+                &mut issues,
+                &mut warnings,
+                &mut detail_rows,
+            );
         }
     }
 
@@ -21,15 +29,34 @@ pub fn check() -> CheckResult {
     engine_findings.extend(crate::anomaly::evaluate_check_result(&sec_result));
     for section in &sec_result.sections {
         for item in &section.items {
-            count_item_status(item, &mut issues, &mut warnings);
+            count_item_status(
+                "安全检查",
+                &section.title,
+                item,
+                &mut issues,
+                &mut warnings,
+                &mut detail_rows,
+            );
         }
     }
 
     for finding in &engine_findings {
         if finding.level == "error" {
             issues += 1;
+            detail_rows.push(vec![
+                "规则引擎".to_string(),
+                "问题".to_string(),
+                finding.title.clone(),
+                format!("{}；建议：{}", finding.summary, finding.suggestion),
+            ]);
         } else if finding.level == "warn" {
             warnings += 1;
+            detail_rows.push(vec![
+                "规则引擎".to_string(),
+                "警告".to_string(),
+                finding.title.clone(),
+                format!("{}；建议：{}", finding.summary, finding.suggestion),
+            ]);
         }
     }
 
@@ -96,6 +123,26 @@ pub fn check() -> CheckResult {
         sections.push(section);
     }
 
+    if !detail_rows.is_empty() {
+        sections.push(Section {
+            title: "警告/问题明细".to_string(),
+            icon: Some("DETAIL".to_string()),
+            description: Some(
+                "默认折叠；展开后查看每一个警告或问题的来源、项目和内容。".to_string(),
+            ),
+            items: vec![Item::Table {
+                headers: vec![
+                    "来源".to_string(),
+                    "级别".to_string(),
+                    "项目".to_string(),
+                    "内容".to_string(),
+                ],
+                rows: detail_rows,
+                status: Some(if issues > 0 { "error" } else { "warn" }.to_string()),
+            }],
+        });
+    }
+
     // 建议
     let mut recommendations = Vec::new();
     if issues > 0 {
@@ -134,22 +181,63 @@ pub fn check() -> CheckResult {
     }
 }
 
-fn count_item_status(item: &Item, issues: &mut i32, warnings: &mut i32) {
+fn count_item_status(
+    source: &str,
+    section: &str,
+    item: &Item,
+    issues: &mut i32,
+    warnings: &mut i32,
+    detail_rows: &mut Vec<Vec<String>>,
+) {
     match item {
         Item::Bar {
-            status: Some(s), ..
-        }
-        | Item::Label {
-            status: Some(s), ..
+            key,
+            value,
+            unit,
+            status: Some(s),
+            ..
         } => {
             if s == "error" {
                 *issues += 1;
+                detail_rows.push(detail_row(
+                    source,
+                    "问题",
+                    section,
+                    key,
+                    &format!("{:.1}{}", value, unit),
+                ));
             } else if s == "warn" {
                 *warnings += 1;
+                detail_rows.push(detail_row(
+                    source,
+                    "警告",
+                    section,
+                    key,
+                    &format!("{:.1}{}", value, unit),
+                ));
             }
         }
-        Item::Warning { .. } => *warnings += 1,
-        Item::Error { .. } => *issues += 1,
+        Item::Label {
+            key,
+            value,
+            status: Some(s),
+        } => {
+            if s == "error" {
+                *issues += 1;
+                detail_rows.push(detail_row(source, "问题", section, key, value));
+            } else if s == "warn" {
+                *warnings += 1;
+                detail_rows.push(detail_row(source, "警告", section, key, value));
+            }
+        }
+        Item::Warning { text } => {
+            *warnings += 1;
+            detail_rows.push(detail_row(source, "警告", section, "提示", text));
+        }
+        Item::Error { text } => {
+            *issues += 1;
+            detail_rows.push(detail_row(source, "问题", section, "错误", text));
+        }
         Item::Finding { level, .. } => {
             if level == "error" {
                 *issues += 1;
@@ -159,4 +247,13 @@ fn count_item_status(item: &Item, issues: &mut i32, warnings: &mut i32) {
         }
         _ => {}
     }
+}
+
+fn detail_row(source: &str, level: &str, section: &str, key: &str, value: &str) -> Vec<String> {
+    vec![
+        source.to_string(),
+        level.to_string(),
+        section.to_string(),
+        format!("{}: {}", key, value),
+    ]
 }

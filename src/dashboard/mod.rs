@@ -1,10 +1,11 @@
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-const TOP_PROCESS_LIMIT: usize = 10;
+const TOP_PROCESS_LIMIT: usize = 20;
 
 /// 系统信息
 #[derive(Debug, Serialize)]
@@ -68,6 +69,8 @@ pub struct DiskInfo {
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
+    pub path: String,
+    pub ports: Vec<String>,
     pub cpu_usage: f32,
     pub memory_bytes: u64,
 }
@@ -195,8 +198,9 @@ fn collect_disks() -> Vec<DiskInfo> {
 }
 
 fn collect_top_processes(n: usize) -> Vec<ProcessInfo> {
+    let port_index = collect_process_port_index();
     let output = Command::new("ps")
-        .args(["-eo", "pid=,comm=,%cpu=,rss=", "--sort=-%cpu"])
+        .args(["-eo", "pid=,comm=,%cpu=,rss=,args=", "--sort=-%cpu"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -216,9 +220,12 @@ fn collect_top_processes(n: usize) -> Vec<ProcessInfo> {
                 .next()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
+            let cmd = parts.collect::<Vec<_>>().join(" ");
             Some(ProcessInfo {
                 pid,
                 name,
+                path: infer_process_path(pid, &cmd),
+                ports: port_index.get(&pid).cloned().unwrap_or_default(),
                 cpu_usage,
                 memory_bytes: rss_kb.saturating_mul(1024),
             })
@@ -246,6 +253,87 @@ fn collect_top_processes(n: usize) -> Vec<ProcessInfo> {
     });
     procs.truncate(n);
     procs
+}
+
+fn collect_process_port_index() -> HashMap<u32, Vec<String>> {
+    let output = Command::new("ss")
+        .args(["-tulnp"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    parse_process_port_index(&output)
+}
+
+fn parse_process_port_index(output: &str) -> HashMap<u32, Vec<String>> {
+    let mut index: HashMap<u32, HashSet<String>> = HashMap::new();
+    for line in output.lines() {
+        let mut columns = line.split_whitespace();
+        let proto = columns.next().unwrap_or_default().to_ascii_lowercase();
+        if proto != "tcp" && proto != "udp" {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(local) = fields.get(4).or_else(|| fields.get(3)).copied() else {
+            continue;
+        };
+        let Some(port) = local
+            .rsplit_once(':')
+            .map(|(_, port)| port.trim_matches(']'))
+            .filter(|port| !port.is_empty() && *port != "0" && *port != "*")
+        else {
+            continue;
+        };
+        let listen = format!("{proto}:{port}");
+
+        let mut from = 0usize;
+        while let Some(offset) = line[from..].find("pid=") {
+            let start = from + offset + 4;
+            let pid_text: String = line[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(pid) = pid_text.parse::<u32>() {
+                index.entry(pid).or_default().insert(listen.clone());
+            }
+            from = start.saturating_add(pid_text.len());
+            if from >= line.len() {
+                break;
+            }
+        }
+    }
+
+    index
+        .into_iter()
+        .map(|(pid, ports)| {
+            let mut ports: Vec<String> = ports.into_iter().collect();
+            ports.sort();
+            ports.dedup();
+            (pid, ports)
+        })
+        .collect()
+}
+
+fn infer_process_path(pid: u32, cmd: &str) -> String {
+    if let Ok(path) = fs::read_link(format!("/proc/{pid}/exe")) {
+        let text = path.to_string_lossy().to_string();
+        if !text.is_empty() {
+            return text;
+        }
+    }
+
+    cmd.split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('(')
+                .trim_matches(')')
+                .to_string()
+        })
+        .find(|token| token.starts_with('/') && !token.starts_with("/proc/"))
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn read_meminfo_value(key: &str) -> u64 {
@@ -460,5 +548,39 @@ pub fn get_system_info() -> SystemInfo {
         networks,
         disks: collect_disks(),
         top_processes: collect_top_processes(TOP_PROCESS_LIMIT),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_process_port_index_extracts_and_deduplicates_pid_ports() {
+        let sample = r#"
+Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+tcp   LISTEN 0      511          0.0.0.0:8080      0.0.0.0:* users:(("java",pid=123,fd=7))
+tcp   LISTEN 0      511          0.0.0.0:8080      0.0.0.0:* users:(("java",pid=123,fd=8))
+udp   UNCONN 0      0               [::]:53           [::]:* users:(("named",pid=77,fd=3))
+tcp   LISTEN 0      128        127.0.0.1:9090      0.0.0.0:* users:(("dm",pid=123,fd=12))
+"#;
+
+        let index = parse_process_port_index(sample);
+
+        assert_eq!(
+            index.get(&123).cloned().unwrap_or_default(),
+            vec!["tcp:8080".to_string(), "tcp:9090".to_string()]
+        );
+        assert_eq!(
+            index.get(&77).cloned().unwrap_or_default(),
+            vec!["udp:53".to_string()]
+        );
+    }
+
+    #[test]
+    fn infer_process_path_falls_back_to_absolute_command_token() {
+        let path = infer_process_path(u32::MAX, "java -Xmx1g -jar /opt/dm/app.jar");
+
+        assert_eq!(path, "/opt/dm/app.jar");
     }
 }

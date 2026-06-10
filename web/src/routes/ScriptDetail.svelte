@@ -44,6 +44,7 @@
   let historySortKey = $state('timestamp');
   let historySortDir = $state('desc');
   let resultTableSort = $state({});
+  let resultSectionOpen = $state({});
   let showDuplicate = $state(false);
   let duplicateId = $state('');
   let duplicateLoading = $state(false);
@@ -56,6 +57,24 @@
   let jsonData = $state(null);
   let showJsonView = $state(false);
   let lastProfileState = $derived(executionState(statsData?.last_execution || historyData[0]));
+
+  function resultSectionKey(section, index) {
+    return `${index}:${section?.title || 'section'}`;
+  }
+
+  function defaultSectionOpen(section) {
+    return !/明细|详情/.test(String(section?.title || ''));
+  }
+
+  function isResultSectionOpen(section, index) {
+    const key = resultSectionKey(section, index);
+    return resultSectionOpen[key] ?? defaultSectionOpen(section);
+  }
+
+  function toggleResultSection(section, index) {
+    const key = resultSectionKey(section, index);
+    resultSectionOpen = { ...resultSectionOpen, [key]: !isResultSectionOpen(section, index) };
+  }
 
   function formatDuration(ms) {
     const s = Math.floor(ms / 1000);
@@ -334,6 +353,22 @@
     try { const raw = localStorage.getItem('dm-params-' + id); return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
   }
 
+  function loadPendingRunPayload() {
+    try {
+      const key = 'dm-run-payload-' + id;
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      localStorage.removeItem(key);
+      const payload = JSON.parse(raw);
+      return {
+        params: payload?.params && typeof payload.params === 'object' ? payload.params : {},
+        args: Array.isArray(payload?.args) ? payload.args.map(String) : [],
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   function changeHistorySort(key) {
     if (historySortKey === key) historySortDir = historySortDir === 'asc' ? 'desc' : 'asc';
     else {
@@ -578,7 +613,8 @@
     }, 100);
   }
 
-  function runScript(record = null) {
+  function runScript(record = null, explicitPayload = null) {
+    if (record?.currentTarget || record?.target) record = null;
     const replayId = record?.id !== undefined ? String(record.id) : '';
     if (replayId) replayingHistoryId = replayId;
     if (terminal) {
@@ -589,6 +625,7 @@
     error = null;
     exitCode = null;
     jsonData = null;
+    resultSectionOpen = {};
     showJsonView = false;
     lineCount = 0;
     durationMs = 0;
@@ -600,7 +637,7 @@
       terminal.writeln('');
     }
     startTimer();
-    connectWs(record ? historyRunPayload(record) : null);
+    connectWs(explicitPayload || (record ? historyRunPayload(record) : null));
   }
 
   function connectWs(payload = null) {
@@ -826,7 +863,7 @@
     if (autorun) {
       const waitForReady = (tries = 0) => {
         if (terminal && info) {
-          runScript();
+          runScript(null, loadPendingRunPayload());
         } else if (tries < 60) {
           setTimeout(() => waitForReady(tries + 1), 50);
         }
@@ -1254,15 +1291,21 @@
         {#if jsonData.sections}
           <div class="result-sections">
             {#each jsonData.sections as section, sectionIndex}
+              {@const sectionOpen = isResultSectionOpen(section, sectionIndex)}
               <div class="result-section">
-                <div class="section-header">
+                <button type="button" class="section-header" onclick={() => toggleResultSection(section, sectionIndex)} aria-expanded={sectionOpen}>
                   {#if section.icon}<span class="section-icon">{section.icon}</span>{/if}
                   <h3 class="section-title">{section.title}</h3>
-                </div>
-                {#if section.description}
-                  <p class="section-desc">{section.description}</p>
+                  <span class="section-toggle">{sectionOpen ? '收起' : '展开'}</span>
+                </button>
+                {#if section.description && !sectionOpen}
+                  <p class="section-desc collapsed">{section.description}</p>
                 {/if}
-                <div class="section-items">
+                {#if sectionOpen}
+                  {#if section.description}
+                    <p class="section-desc">{section.description}</p>
+                  {/if}
+                  <div class="section-items">
                   {#each section.items as item, itemIndex}
                     {@const itemKey = `result-${sectionIndex}-${itemIndex}`}
                     {#if item.type === 'finding'}
@@ -1371,7 +1414,8 @@
                       <div class="result-divider"></div>
                     {/if}
                   {/each}
-                </div>
+                  </div>
+                {/if}
               </div>
             {/each}
           </div>
@@ -2456,12 +2500,21 @@
   }
 
   .section-header {
+    width: 100%;
     display: flex;
     align-items: center;
     gap: 8px;
     margin-bottom: 12px;
     padding-bottom: 10px;
+    border: 0;
     border-bottom: 1px solid var(--border-primary);
+    background: transparent;
+    color: inherit;
+    text-align: left;
+  }
+
+  .section-header[aria-expanded="false"] {
+    margin-bottom: 0;
   }
 
   .section-icon {
@@ -2469,16 +2522,32 @@
   }
 
   .section-title {
+    flex: 1;
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
   }
 
+  .section-toggle {
+    flex: 0 0 auto;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(34, 211, 238, .18);
+    background: rgba(34, 211, 238, .07);
+    color: #67e8f9;
+    font-size: 11px;
+    font-weight: 800;
+  }
+
   .section-desc {
     font-size: 12px;
     color: var(--text-secondary);
     margin: 0 0 12px;
+  }
+
+  .section-desc.collapsed {
+    margin: 10px 0 0;
   }
 
   .section-items {

@@ -19,6 +19,7 @@
   let selectedRecord = $state(null);
   let showAdvancedFilters = $state(false);
   let showTrafficStats = $state(false);
+  let showInterfacePicker = $state(false);
   let importInput = $state(null);
   let formattedPanels = $state(new Set());
   let ws = null;
@@ -77,13 +78,29 @@
         interfaces = data.interfaces || [];
         captureSupported = Boolean(data.capture_supported);
         platform = data.platform || 'linux';
-        if (!selectedInterface && interfaces.length) selectedInterface = interfaces.find(i => i.name !== 'lo')?.name || interfaces[0].name;
+        if (!selectedInterface && interfaces.length) selectedInterface = interfaces[0].name;
       }
     } catch (e) {
       pushLog('error', '加载网卡失败: ' + (e.message || e));
     } finally {
       loading = false;
     }
+  }
+
+  function selectInterface(name) {
+    if (status === 'running' || status === 'connecting') return;
+    selectedInterface = name;
+    showInterfacePicker = false;
+  }
+
+  function interfaceKindClass(item) {
+    if (item?.kind === 'loopback' || item?.name === 'lo' || item?.ip === '127.0.0.1' || item?.ip === '::1') return 'loopback';
+    return item?.kind || (item?.is_public ? 'public' : item?.is_physical ? 'physical' : item?.is_virtual ? 'virtual' : 'other');
+  }
+
+  function interfaceKindLabel(item) {
+    if (interfaceKindClass(item) === 'loopback') return '本地回环';
+    return item?.kind_label || (item?.is_public ? '公网' : item?.is_physical ? '物理' : item?.is_virtual ? '虚拟' : '其它');
   }
 
   function startCapture() {
@@ -339,7 +356,15 @@
   }
 
   function rawVisibleText(record) {
-    return String(record?.decoded || record?.summary || record?.request?.raw_preview || record?.request?.body_preview || '').trim();
+    return String(
+      record?.request?.body_preview
+      || record?.request?.raw_preview
+      || record?.response?.body_preview
+      || record?.response?.raw_preview
+      || record?.decoded
+      || record?.summary
+      || ''
+    ).trim();
   }
 
   function formatDecoded(value) {
@@ -756,7 +781,31 @@
     if (loose && readableRatio(loose) >= 0.85 && (loose.match(/\uFFFD/g) || []).length <= 2) {
       return appendTruncation(cleanText(loose), bytes.length, slice.length);
     }
+    const printable = printablePayloadText(slice, bytes.length);
+    if (printable) return appendTruncation(printable, bytes.length, slice.length);
     return `<binary payload: ${bytes.length} bytes, not safe text>\nHEX ${hexPreview(slice, 96)}\nASCII ${asciiPreview(slice, 96)}`;
+  }
+
+  function printablePayloadText(bytes, originalLength = bytes?.length || 0) {
+    if (!bytes?.length) return '';
+    let out = '';
+    let printable = 0;
+    let lastSpace = false;
+    for (const byte of bytes) {
+      if (byte === 10 || byte === 13 || byte === 9 || (byte >= 32 && byte <= 126)) {
+        out += String.fromCharCode(byte);
+        printable += 1;
+        lastSpace = byte === 32;
+      } else if (!lastSpace) {
+        out += ' ';
+        lastSpace = true;
+      }
+    }
+    const cleaned = out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join('\n');
+    if (printable < 8 || cleaned.length < 8) return '';
+    const ratio = printable / Math.max(1, bytes.length);
+    if (ratio < 0.18 && cleaned.split(/\s+/).filter(Boolean).length < 2) return '';
+    return cleanText(cleaned);
   }
 
   function decodeText(bytes, encoding, fatal) {
@@ -896,7 +945,36 @@
     </div>
 
     <div class="filters primary-filters">
-      <label><span>网卡</span><select bind:value={selectedInterface} disabled={status === 'running'}>{#each interfaces as item}<option value={item.name}>{item.name}{item.ip ? ` · ${item.ip}` : ''}</option>{/each}</select></label>
+      <div class="iface-picker-wrap">
+        <span class="filter-label">网卡</span>
+        <button
+          class="iface-trigger"
+          class:open={showInterfacePicker}
+          onclick={() => status !== 'running' && status !== 'connecting' && (showInterfacePicker = !showInterfacePicker)}
+          disabled={status === 'running' || status === 'connecting'}
+          type="button"
+        >
+          {#if selectedInterfaceStats}
+            <span class="iface-kind {interfaceKindClass(selectedInterfaceStats)}">{interfaceKindLabel(selectedInterfaceStats)}</span>
+            <strong>{selectedInterfaceStats.name}</strong>
+            <em>{selectedInterfaceStats.ip || '无 IP'}</em>
+          {:else}
+            <strong>{loading ? '扫描网卡...' : '请选择网卡'}</strong>
+          {/if}
+        </button>
+        {#if showInterfacePicker && status !== 'running' && status !== 'connecting'}
+          <div class="iface-menu">
+            {#each interfaces as item}
+              <button class="iface-option" class:active={item.name === selectedInterface} onclick={() => selectInterface(item.name)} type="button">
+                <span class="iface-kind {interfaceKindClass(item)}">{interfaceKindLabel(item)}</span>
+                <strong>{item.name}</strong>
+                <em>{item.ip || '无 IP'}</em>
+                <small>{formatBytes(item.received_bytes)} ↓ / {formatBytes(item.transmitted_bytes)} ↑</small>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
       <label><span>协议</span><select bind:value={protocol}>{#each protocols as p}<option value={p.value}>{p.label}</option>{/each}</select></label>
       <label><span>端口</span><input bind:value={port} placeholder="80/443" inputmode="numeric" /></label>
       <button class="filter-fold" onclick={() => showAdvancedFilters = !showAdvancedFilters}>
@@ -1151,11 +1229,67 @@
   @keyframes listenGlow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.35); } }
   @keyframes listenDot { 0% { box-shadow: 0 0 0 0 rgba(34,197,94,.5); } 100% { box-shadow: 0 0 0 12px rgba(34,197,94,0); } }
   .filters { display: grid; gap: 7px; }
-  .primary-filters { grid-template-columns: 190px 116px 150px auto; align-items: end; }
+  .primary-filters { grid-template-columns: 300px 116px 150px auto; align-items: end; }
   .advanced-filters { grid-template-columns: repeat(4, minmax(140px, 1fr)); margin-top: 8px; padding: 9px; border: 1px solid rgba(45,212,191,.12); border-radius: 10px; background: rgba(2,6,23,.28); }
   label { display: grid; gap: 4px; color: #93c5fd; font-size: 11px; font-weight: 800; }
+  .filter-label { color: #93c5fd; font-size: 11px; font-weight: 800; }
   input, select { min-height: 30px; width: 100%; box-sizing: border-box; border: 1px solid rgba(45,212,191,.22); border-radius: 8px; background: rgba(2,6,23,.7); color: #f8fafc; padding: 0 8px; outline: none; font-size: 12px; }
   input:focus, select:focus { border-color: #fbbf24; box-shadow: 0 0 0 2px rgba(251,191,36,.12); }
+  .iface-picker-wrap { position: relative; display: grid; gap: 4px; min-width: 0; }
+  .iface-trigger {
+    width: 100%;
+    min-height: 34px;
+    display: grid;
+    grid-template-columns: 44px minmax(70px, .8fr) minmax(0, 1fr);
+    gap: 7px;
+    align-items: center;
+    border: 1px solid rgba(45,212,191,.26);
+    border-radius: 9px;
+    background: linear-gradient(135deg, rgba(2,6,23,.86), rgba(8,47,73,.46));
+    color: #f8fafc;
+    text-align: left;
+    box-shadow: inset 0 0 18px rgba(45,212,191,.04);
+  }
+  .iface-trigger.open { border-color: rgba(251,191,36,.44); box-shadow: 0 0 0 2px rgba(251,191,36,.10); }
+  .iface-trigger strong, .iface-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--theme-font-family-mono); font-size: 12px; }
+  .iface-trigger em, .iface-option em { overflow: hidden; color: #94a3b8; font-family: var(--theme-font-family-mono); font-size: 11px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+  .iface-kind { display: inline-grid; place-items: center; min-height: 20px; border-radius: 6px; border: 1px solid rgba(148,163,184,.16); background: rgba(15,23,42,.72); color: #cbd5e1; font-size: 10px; font-weight: 900; }
+  .iface-kind.public { color: #fde68a; border-color: rgba(251,191,36,.38); background: rgba(251,191,36,.10); box-shadow: 0 0 18px rgba(251,191,36,.08); }
+  .iface-kind.physical { color: #99f6e4; border-color: rgba(45,212,191,.34); background: rgba(20,184,166,.12); }
+  .iface-kind.loopback { color: #f0abfc; border-color: rgba(217,70,239,.30); background: rgba(134,25,143,.14); }
+  .iface-kind.virtual { color: #c4b5fd; border-color: rgba(167,139,250,.28); background: rgba(109,40,217,.12); }
+  .iface-kind.other { color: #bfdbfe; border-color: rgba(96,165,250,.24); background: rgba(37,99,235,.10); }
+  .iface-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 50;
+    max-height: 310px;
+    overflow: auto;
+    padding: 6px;
+    border: 1px solid rgba(94,234,212,.22);
+    border-radius: 11px;
+    background: linear-gradient(145deg, rgba(2,6,23,.98), rgba(8,24,34,.97));
+    box-shadow: 0 20px 54px rgba(0,0,0,.46), inset 0 0 22px rgba(45,212,191,.04);
+  }
+  .iface-option {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 44px minmax(70px, .8fr) minmax(0, 1fr);
+    gap: 7px;
+    align-items: center;
+    min-height: 42px;
+    margin: 0 0 5px;
+    border: 1px solid rgba(148,163,184,.10);
+    border-radius: 8px;
+    background: rgba(15,23,42,.46);
+    color: #e2e8f0;
+    text-align: left;
+  }
+  .iface-option:last-child { margin-bottom: 0; }
+  .iface-option.active { border-color: rgba(45,212,191,.46); background: rgba(20,184,166,.14); }
+  .iface-option small { grid-column: 2 / -1; color: #64748b; font-family: var(--theme-font-family-mono); font-size: 10px; }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
   button { min-height: 29px; border-radius: 8px; padding: 0 10px; font-size: 12px; font-weight: 900; cursor: default; }
   button:disabled { opacity: .45; cursor: default; }

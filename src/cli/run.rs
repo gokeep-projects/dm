@@ -2,7 +2,7 @@ use crate::cli::util::{category_color, format_duration_ms, print_heading, status
 use crate::config::{all_script_dirs, Config};
 use crate::db::Database;
 use crate::script;
-use crate::script::executor::{resolve_interpreter, system_environment};
+use crate::script::executor::{parameter_environment, resolve_interpreter, system_environment};
 use anyhow::Result;
 use colored::*;
 use std::io::{self, Write};
@@ -43,16 +43,16 @@ pub async fn execute(
     })?;
 
     let start_time = Instant::now();
-    let param_json = params
+    let param_map = params
         .iter()
         .filter_map(|param| param.split_once('='))
-        .map(|(key, value)| {
-            (
-                key.to_string(),
-                serde_json::Value::String(value.to_string()),
-            )
-        })
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<std::collections::HashMap<String, String>>();
+    let param_json = param_map
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
         .collect::<serde_json::Map<String, serde_json::Value>>();
+    let param_envs = parameter_environment(&param_map);
     db.insert_exec_with_inputs(
         &script.id,
         &script.name,
@@ -184,6 +184,7 @@ pub async fn execute(
                 Command::new(&cmd)
                     .args(&cmd_args)
                     .envs(system_environment())
+                    .envs(&param_envs)
                     .output()
             })
             .await
@@ -213,6 +214,7 @@ pub async fn execute(
             Command::new(&cmd)
                 .args(&cmd_args)
                 .envs(system_environment())
+                .envs(&param_envs)
                 .output()?
         };
         let elapsed = start_time.elapsed();
@@ -244,6 +246,7 @@ pub async fn execute(
             Command::new(&cmd)
                 .args(&cmd_args)
                 .envs(system_environment())
+                .envs(&param_envs)
                 .status()
         })
         .await
@@ -276,6 +279,7 @@ pub async fn execute(
         Command::new(&cmd)
             .args(&cmd_args)
             .envs(system_environment())
+            .envs(&param_envs)
             .status()?
     };
     let elapsed = start_time.elapsed();

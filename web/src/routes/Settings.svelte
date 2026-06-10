@@ -253,18 +253,8 @@
       </div>
 
       <div class="settings-section">
-        <h3>🎨 界面设置</h3>
+        <h3>界面设置</h3>
         <div class="setting-rows">
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-label">主题</span>
-              <span class="setting-desc">界面主题颜色</span>
-            </div>
-            <select bind:value={config.theme} class="setting-select">
-              <option value="light">明亮</option>
-              <option value="dark">暗黑</option>
-            </select>
-          </div>
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-label">语言</span>
@@ -280,11 +270,18 @@
 
       <div class="settings-section about-section">
         <h3>关于 DM</h3>
-        <div class="about-grid">
-          <div><span>版本</span><strong>{config.about?.version || '0.1.0'}</strong></div>
-          <div><span>作者</span><strong>{config.about?.author || 'xuning'}</strong></div>
-          <div><span>邮箱</span><strong>{config.about?.email || 'gokeeps@qq.com'}</strong></div>
-          <div><span>许可证</span><strong>{config.about?.license || 'MIT'}</strong></div>
+        <div class="about-compact">
+          <div class="about-mark">DM</div>
+          <div class="about-copy">
+            <strong>离线优先的现场运维观测平台</strong>
+            <p>集成系统体检、维护脚本、服务健康、流量分析、Java 运行时堆栈观测和规则引擎，Web 与 CLI 共用同一套本地能力。</p>
+          </div>
+          <div class="about-meta">
+            <span>版本 {config.about?.version || '0.1.0'}</span>
+            <span>许可证 {config.about?.license || 'MIT'}</span>
+            <span>作者 {config.about?.author || 'xuning'}</span>
+            <span>{config.about?.email || 'gokeeps@qq.com'}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -321,11 +318,24 @@
   .settings-grid { display: flex; flex-direction: column; gap: 20px; }
   .settings-section { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; padding: 20px; }
   .settings-section h3 { font-size: 15px; font-weight: 700; color: var(--text-primary); margin: 0 0 16px; }
-  .about-section { grid-column: 1 / -1; }
-  .about-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-  .about-grid div { min-width: 0; padding: 12px; border-radius: 10px; border: 1px solid var(--border-secondary); background: var(--bg-secondary); }
-  .about-grid span { display: block; margin-bottom: 6px; color: var(--text-tertiary); font-size: 12px; }
-  .about-grid strong { display: block; color: var(--text-primary); font-family: var(--theme-font-family-mono); overflow-wrap: anywhere; }
+  .about-section { grid-column: 1 / -1; padding: 16px 18px; }
+  .about-compact { display: grid; grid-template-columns: 54px minmax(0, 1fr) minmax(220px, auto); gap: 14px; align-items: center; }
+  .about-mark {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    color: #ecfeff;
+    font-weight: 900;
+    background: radial-gradient(circle at 50% 38%, rgba(34, 211, 238, .28), transparent 62%), linear-gradient(135deg, #0f172a, #164e63);
+    border: 1px solid rgba(34, 211, 238, .26);
+    box-shadow: 0 0 22px rgba(34, 211, 238, .12);
+  }
+  .about-copy strong { display: block; color: var(--text-primary); font-size: 14px; margin-bottom: 4px; }
+  .about-copy p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
+  .about-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .about-meta span { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; border-radius: 999px; border: 1px solid var(--border-secondary); background: var(--bg-secondary); color: var(--text-tertiary); font-size: 11px; font-family: var(--theme-font-family-mono); }
   .setting-rows { display: flex; flex-direction: column; gap: 14px; }
   .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
   .setting-info { flex: 1; }
@@ -349,10 +359,12 @@
     .header-right { flex-wrap: wrap; }
     .setting-row { flex-direction: column; align-items: stretch; gap: 8px; }
     .setting-input, .setting-select { width: 100%; }
-    .about-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .about-compact { grid-template-columns: 46px minmax(0, 1fr); }
+    .about-meta { grid-column: 1 / -1; justify-content: flex-start; }
   }
 
   @media (max-width: 520px) {
-    .about-grid { grid-template-columns: 1fr; }
+    .about-compact { grid-template-columns: 1fr; }
+    .about-mark { width: 40px; height: 40px; }
   }
 </style>

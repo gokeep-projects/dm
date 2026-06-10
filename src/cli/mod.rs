@@ -4,6 +4,7 @@ pub mod clean;
 pub mod docs_cmd;
 pub mod duplicate;
 pub mod info;
+pub mod java;
 pub mod list;
 pub mod logs;
 pub mod maintenance;
@@ -15,6 +16,7 @@ pub mod version;
 
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
+use java::JavaExportFormat;
 
 #[derive(Parser)]
 #[command(name = "dm", version, about = "现场维护工具 - 脚本管理与执行平台")]
@@ -118,11 +120,64 @@ pub enum Commands {
         #[command(subcommand)]
         action: MaintenanceAction,
     },
+    /// Java 堆栈实时分析
+    Java {
+        #[command(subcommand)]
+        action: JavaAction,
+    },
     /// 生成 shell 命令补全脚本
     Completions {
         /// 目标 shell: bash/zsh/fish/powershell/elvish
         #[arg(value_enum)]
         shell: Shell,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JavaAction {
+    /// 列出运行中的 Java 进程
+    List {
+        /// 按 PID、服务名、路径、端口搜索
+        #[arg(short, long)]
+        search: Option<String>,
+        /// 输出原始 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 对指定 Java 进程执行快速分析
+    Analyze {
+        /// Java 进程 PID
+        #[arg(long)]
+        pid: u32,
+        #[arg(long, default_value = "4", hide = true)]
+        samples: u8,
+        #[arg(long, default_value = "700", hide = true)]
+        interval_ms: u64,
+        /// 不采集类直方图
+        #[arg(long)]
+        no_histogram: bool,
+        /// 输出原始 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 导出 Java 分析数据
+    Export {
+        /// Java 进程 PID
+        #[arg(long)]
+        pid: u32,
+        #[arg(long, default_value = "4", hide = true)]
+        samples: u8,
+        #[arg(long, default_value = "700", hide = true)]
+        interval_ms: u64,
+        /// 不采集类直方图
+        #[arg(long)]
+        no_histogram: bool,
+        /// 导出格式: json/raw/report/pdf
+        #[arg(long, value_enum, default_value = "report")]
+        format: JavaExportFormat,
+        /// 输出文件路径
+        #[arg(short, long)]
+        output: std::path::PathBuf,
     },
 }
 
@@ -149,6 +204,42 @@ pub enum DocsAction {
         /// 文档分类
         #[arg(short, long, default_value = "通用")]
         category: String,
+    },
+    /// 创建文档目录
+    Mkdir {
+        /// 目录名称
+        name: String,
+    },
+    /// 导入 Markdown/文本文件为维护文档
+    Import {
+        /// 文件路径
+        file: std::path::PathBuf,
+        /// 指定文档 ID；不指定时自动生成
+        #[arg(long)]
+        id: Option<String>,
+        /// 指定标题；不指定时自动解析
+        #[arg(short, long)]
+        title: Option<String>,
+        /// 文档目录/分类
+        #[arg(short, long, default_value = "导入文档")]
+        category: String,
+    },
+    /// 更新文档标题、目录或正文
+    Update {
+        /// 文档 ID
+        doc_id: String,
+        /// 新标题
+        #[arg(short, long)]
+        title: Option<String>,
+        /// 新目录/分类
+        #[arg(short, long)]
+        category: Option<String>,
+        /// 直接传入正文
+        #[arg(long)]
+        content: Option<String>,
+        /// 从文件读取正文
+        #[arg(short, long)]
+        file: Option<std::path::PathBuf>,
     },
     /// 删除文档
     Delete {
@@ -255,6 +346,142 @@ mod tests {
                 assert!(daemon);
             }
             _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn java_analyze_command_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "dm",
+            "java",
+            "analyze",
+            "--pid",
+            "1234",
+            "--samples",
+            "5",
+            "--interval-ms",
+            "300",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Java { action }) => match action {
+                super::JavaAction::Analyze {
+                    pid,
+                    samples,
+                    interval_ms,
+                    json,
+                    no_histogram,
+                } => {
+                    assert_eq!(pid, 1234);
+                    assert_eq!(samples, 5);
+                    assert_eq!(interval_ms, 300);
+                    assert!(!no_histogram);
+                    assert!(json);
+                }
+                _ => panic!("expected java analyze"),
+            },
+            _ => panic!("expected java command"),
+        }
+    }
+
+    #[test]
+    fn java_export_command_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "dm",
+            "java",
+            "export",
+            "--pid",
+            "99",
+            "--format",
+            "raw",
+            "--output",
+            "/tmp/java-raw.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Java { action }) => match action {
+                super::JavaAction::Export { pid, output, .. } => {
+                    assert_eq!(pid, 99);
+                    assert_eq!(output, std::path::PathBuf::from("/tmp/java-raw.json"));
+                }
+                _ => panic!("expected java export"),
+            },
+            _ => panic!("expected java command"),
+        }
+    }
+
+    #[test]
+    fn docs_import_command_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "dm",
+            "docs",
+            "import",
+            "/tmp/runbook.md",
+            "--id",
+            "runbook",
+            "--title",
+            "运行手册",
+            "--category",
+            "生产",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Docs { action }) => match action {
+                super::DocsAction::Import {
+                    file,
+                    id,
+                    title,
+                    category,
+                } => {
+                    assert_eq!(file, std::path::PathBuf::from("/tmp/runbook.md"));
+                    assert_eq!(id.as_deref(), Some("runbook"));
+                    assert_eq!(title.as_deref(), Some("运行手册"));
+                    assert_eq!(category, "生产");
+                }
+                _ => panic!("expected docs import"),
+            },
+            _ => panic!("expected docs command"),
+        }
+    }
+
+    #[test]
+    fn docs_update_and_mkdir_commands_are_parsed() {
+        let cli = Cli::try_parse_from([
+            "dm",
+            "docs",
+            "update",
+            "runbook",
+            "--title",
+            "新标题",
+            "--file",
+            "/tmp/body.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Docs { action }) => match action {
+                super::DocsAction::Update {
+                    doc_id,
+                    title,
+                    file,
+                    ..
+                } => {
+                    assert_eq!(doc_id, "runbook");
+                    assert_eq!(title.as_deref(), Some("新标题"));
+                    assert_eq!(file, Some(std::path::PathBuf::from("/tmp/body.md")));
+                }
+                _ => panic!("expected docs update"),
+            },
+            _ => panic!("expected docs command"),
+        }
+
+        let cli = Cli::try_parse_from(["dm", "docs", "mkdir", "数据库"]).unwrap();
+        match cli.command {
+            Some(Commands::Docs { action }) => match action {
+                super::DocsAction::Mkdir { name } => assert_eq!(name, "数据库"),
+                _ => panic!("expected docs mkdir"),
+            },
+            _ => panic!("expected docs command"),
         }
     }
 }

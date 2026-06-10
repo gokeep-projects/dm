@@ -12,11 +12,14 @@
   let execStats = $state({});
   let favorites = $state(new Set());
   let showFavOnly = $state(false);
-  let showSystemScripts = $state(false);
+  let showSystemScripts = $state(true);
   let showFailedOnly = $state(false);
   let showParamOnly = $state(false);
   let showUpload = $state(false);
   let showFilters = $state(false);
+  let showCategoryMenu = $state(false);
+  let categorySearch = $state('');
+  let categorySearchInput = $state(null);
   let uploadFile = $state(null);
   let uploadId = $state('');
   let uploadTitle = $state('');
@@ -42,6 +45,10 @@
   let editLoading = $state(false);
   let editError = $state(null);
   let runResults = $state({});
+  let runParamScript = $state(null);
+  let runParamValues = $state({});
+  let runParamMode = $state('named');
+  let runParamError = $state('');
   let headerSearchInput = $state(null);
   let copiedCommandId = $state('');
   let confirmDeleteScript = $state(null);
@@ -108,6 +115,8 @@
   function sourceCount(source) { return scripts.filter(s => source === 'user' ? s.user_managed : !s.user_managed).length; }
   function visibleScopeText() { return showSystemScripts ? '用户脚本 + 内置脚本' : '仅用户脚本，内置脚本未勾选'; }
   function cliCommand(script) { return `dm run ${script.id}`; }
+  function runParamDefs(script) { return script?.metadata?.params || []; }
+  function paramType(param) { return param?.type || param?.param_type || 'string'; }
   function versionText(script) { return script.metadata?.version ? `v${script.metadata.version}` : 'v1.0.0'; }
   function scriptType(script) {
     const path = String(script.path || '');
@@ -139,6 +148,116 @@
   }
   function paramCount(script) { return script.metadata?.params?.length || 0; }
   function configurableCount() { return scripts.filter(s => paramCount(s) > 0).length; }
+
+  function storedParamValues(scriptId) {
+    try {
+      const raw = localStorage.getItem('dm-params-' + scriptId);
+      return raw ? JSON.parse(raw) : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function openRunParams(script) {
+    if (!script) return;
+    const defs = runParamDefs(script);
+    if (!defs.length) {
+      location.hash = '#/script/' + script.id + '/run';
+      return;
+    }
+    const saved = storedParamValues(script.id);
+    const next = {};
+    for (const p of defs) {
+      next[p.name] = saved[p.name] ?? p.default ?? (paramType(p) === 'boolean' ? 'false' : '');
+    }
+    runParamScript = script;
+    runParamValues = next;
+    runParamMode = 'named';
+    runParamError = '';
+  }
+
+  function closeRunParams() {
+    runParamScript = null;
+    runParamValues = {};
+    runParamMode = 'named';
+    runParamError = '';
+  }
+
+  function updateRunParam(name, value) {
+    runParamValues = { ...runParamValues, [name]: value };
+  }
+
+  function selectedRunParams() {
+    const params = {};
+    for (const p of runParamDefs(runParamScript)) {
+      const value = (runParamValues[p.name] ?? '').toString();
+      if (value !== '' && !(paramType(p) === 'boolean' && value === 'false' && !p.required)) {
+        params[p.name] = value;
+      }
+    }
+    return params;
+  }
+
+  function validateRunParams() {
+    for (const p of runParamDefs(runParamScript)) {
+      const value = (runParamValues[p.name] ?? '').toString().trim();
+      if (p.required && !value) {
+        return `参数 ${p.name} 为必填`;
+      }
+    }
+    return '';
+  }
+
+  function buildListRunCommand() {
+    if (!runParamScript) return '';
+    const defs = runParamDefs(runParamScript);
+    const selected = selectedRunParams();
+    const parts = ['dm', 'run', shellQuote(runParamScript.id)];
+    if (runParamMode === 'positional') {
+      for (const p of defs) {
+        const value = (runParamValues[p.name] ?? '').toString();
+        if (value !== '' && !(paramType(p) === 'boolean' && value === 'false' && !p.required)) parts.push(shellQuote(value));
+      }
+    } else {
+      for (const [key, value] of Object.entries(selected)) {
+        parts.push('--param', shellQuote(`${key}=${value}`));
+      }
+    }
+    return parts.join(' ');
+  }
+
+  function shellQuote(value) {
+    const text = String(value ?? '');
+    if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(text)) return text;
+    return "'" + text.replace(/'/g, "'\\''") + "'";
+  }
+
+  function confirmRunParams() {
+    if (!runParamScript) return;
+    const error = validateRunParams();
+    if (error) {
+      runParamError = error;
+      return;
+    }
+    const params = selectedRunParams();
+    const args = [];
+    if (runParamMode === 'positional') {
+      for (const p of runParamDefs(runParamScript)) {
+        const value = (runParamValues[p.name] ?? '').toString();
+        if (value !== '' && !(paramType(p) === 'boolean' && value === 'false' && !p.required)) args.push(value);
+      }
+    }
+    try {
+      localStorage.setItem('dm-params-' + runParamScript.id, JSON.stringify(runParamValues));
+      localStorage.setItem('dm-run-payload-' + runParamScript.id, JSON.stringify({
+        params: runParamMode === 'named' ? params : {},
+        args,
+      }));
+    } catch (_) {}
+    const id = runParamScript.id;
+    closeRunParams();
+    location.hash = '#/script/' + id + '/run';
+  }
 
   function onSearch(e) { search = e.target.value; }
 
@@ -526,6 +645,24 @@
     };
   }));
 
+  let filteredCats = $derived.by(() => {
+    const q = categorySearch.trim().toLowerCase();
+    return cats.filter(c => (!q || c.toLowerCase().includes(q)) && categoryCount(c) > 0);
+  });
+
+  function selectCategory(value) {
+    cat = value;
+    showCategoryMenu = false;
+    categorySearch = '';
+  }
+
+  function toggleCategoryMenu() {
+    showCategoryMenu = !showCategoryMenu;
+    if (showCategoryMenu) {
+      requestAnimationFrame(() => categorySearchInput?.focus());
+    }
+  }
+
   let sortedScripts = $derived.by(() => {
     const q = search.trim().toLowerCase();
     let arr = numberedScripts.filter(s => {
@@ -633,10 +770,10 @@
       <button class="upload-btn filter-toggle-btn" onclick={() => showFilters = !showFilters}>
         筛选{cat || search || showFavOnly || showFailedOnly || showSystemScripts ? ' *' : ''} {showFilters ? '↑' : '↓'}
       </button>
-      <label class="builtin-checkbox-toggle" class:active={showSystemScripts} title="默认不勾选；勾选后才显示内置脚本">
+      <label class="builtin-checkbox-toggle" class:active={showSystemScripts} title="默认显示；关闭后仅显示用户脚本">
         <input type="checkbox" bind:checked={showSystemScripts} />
         <span>显示内置脚本</span>
-        <em>{showSystemScripts ? '已显示' : '默认关闭'}</em>
+        <em>{showSystemScripts ? '默认显示' : '已隐藏'}</em>
       </label>
       <select class="sort-select" bind:value={sort} aria-label="排序方式">
         <option value="number">默认排序</option>
@@ -673,6 +810,33 @@
 
   {#if showFilters}
   <div class="filter-section">
+    <div class="category-select-filter">
+      <button class="category-trigger" class:active={Boolean(cat)} onclick={toggleCategoryMenu} type="button">
+        <span>{cat || '全部类别'}</span>
+        <em>{cat ? categoryCount(cat) : visibleSourceCount()}</em>
+        <b>{showCategoryMenu ? '↑' : '↓'}</b>
+      </button>
+      {#if showCategoryMenu}
+        <div class="category-menu" role="listbox" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => {
+          if (event.key === 'Escape') showCategoryMenu = false;
+          if (event.key === 'Enter' && filteredCats[0]) selectCategory(filteredCats[0]);
+        }}>
+          <input class="category-search" bind:this={categorySearchInput} bind:value={categorySearch} placeholder="搜索类别..." aria-label="搜索脚本类别" />
+          <button class="category-option" class:active={!cat} onclick={() => selectCategory('')} type="button">
+            <span>全部类别</span>
+            <em>{visibleSourceCount()}</em>
+          </button>
+          {#each filteredCats as c}
+            <button class="category-option" class:active={cat === c} onclick={() => selectCategory(c)} type="button">
+              <span>{c}</span>
+              <em>{categoryCount(c)}</em>
+            </button>
+          {:else}
+            <div class="category-empty">没有匹配类别</div>
+          {/each}
+        </div>
+      {/if}
+    </div>
     <div class="category-chips" aria-label="分类筛选">
       <button class="chip" class:active={!cat} onclick={() => cat = ''}>
         <span>当前范围全部</span>
@@ -690,7 +854,7 @@
         <span>可配置</span>
         <span class="chip-count">{configurableCount()}</span>
       </button>
-      {#each cats as c}
+      {#each filteredCats as c}
         <button class="chip" class:active={cat === c} onclick={() => cat = c}>
           <span class="chip-icon">{getIcon(c)}</span>
           <span>{c}</span>
@@ -757,9 +921,9 @@
               </button>
               <button
                 class="card-run-btn"
-                onclick={(e) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/script/' + s.id + '/run'; }}
-                aria-label="快速执行 {s.name}"
-                title="快速执行 {s.name}">
+                onclick={(e) => { e.preventDefault(); e.stopPropagation(); openRunParams(s); }}
+                aria-label="{paramCount(s) > 0 ? '带参数执行' : '快速执行'} {s.name}"
+                title="{paramCount(s) > 0 ? '带参数执行' : '快速执行'} {s.name}">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M8 5v14l11-7z"/>
                 </svg>
@@ -833,7 +997,8 @@
         <span>名称</span>
         <span>功能</span>
         <span>类型</span>
-        <span>分类</span>
+        <span>来源</span>
+        <span>类别</span>
         <span>标识</span>
         <span>状态</span>
         <span>次数</span>
@@ -862,6 +1027,9 @@
           </div>
           <div class="row-type">
             <span class="type-pill">{scriptType(s)}</span>
+          </div>
+          <div class="row-source">
+            <span class="source-pill {sourceClass(s)}">{sourceLabel(s)}</span>
           </div>
           <div class="row-category">
             <span class="cat-pill" style="background:{getCatColors(s.category)[0]}1a;color:{getCatColors(s.category)[0]};border-color:{getCatColors(s.category)[0]}33">{s.category}</span>
@@ -895,13 +1063,13 @@
             </button>
             <button
               class="row-run-btn"
-              onclick={(e) => { e.preventDefault(); e.stopPropagation(); location.hash = '#/script/' + s.id + '/run'; }}
-              aria-label="执行 {s.name} 并查看实时返回"
-              title="执行并查看实时返回">
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); openRunParams(s); }}
+              aria-label="{paramCount(s) > 0 ? '带参数执行' : '执行'} {s.name} 并查看实时返回"
+              title="{paramCount(s) > 0 ? '带参数执行并查看实时返回' : '执行并查看实时返回'}">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M8 5v14l11-7z"/>
               </svg>
-              <span>执行</span>
+              <span>{paramCount(s) > 0 ? '参数执行' : '执行'}</span>
             </button>
             {#if s.user_managed}
               <button
@@ -1094,6 +1262,76 @@
   </div>
 {/if}
 
+{#if runParamScript}
+  <div class="modal-overlay locked-overlay" role="presentation">
+    <div class="modal run-param-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+      <div class="modal-header">
+        <h3>带参数执行 - {runParamScript.name}</h3>
+        <button class="modal-close" onclick={closeRunParams}>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="run-param-summary">
+          <div>
+            <span>脚本标识</span>
+            <strong>{runParamScript.id}</strong>
+          </div>
+          <div>
+            <span>脚本类型</span>
+            <strong>{scriptType(runParamScript)}</strong>
+          </div>
+          <div>
+            <span>参数数量</span>
+            <strong>{runParamDefs(runParamScript).length}</strong>
+          </div>
+        </div>
+
+        <div class="run-mode-tabs" aria-label="参数传递方式">
+          <button class:active={runParamMode === 'named'} onclick={() => runParamMode = 'named'} type="button">命名参数</button>
+          <button class:active={runParamMode === 'positional'} onclick={() => runParamMode = 'positional'} type="button">位置参数</button>
+        </div>
+
+        <div class="run-param-grid">
+          {#each runParamDefs(runParamScript) as p}
+            <label class="run-param-field" class:required={p.required}>
+              <span>
+                <code>{p.name}</code>
+                <em>{paramType(p)}</em>
+                {#if p.required}<b>必填</b>{/if}
+              </span>
+              {#if p.description}
+                <small>{p.description}</small>
+              {/if}
+              {#if paramType(p) === 'boolean'}
+                <select value={runParamValues[p.name] ?? 'false'} onchange={(e) => updateRunParam(p.name, e.currentTarget.value)}>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              {:else if paramType(p) === 'number'}
+                <input type="number" value={runParamValues[p.name] ?? ''} placeholder={p.default ?? ''} oninput={(e) => updateRunParam(p.name, e.currentTarget.value)} />
+              {:else}
+                <input type="text" value={runParamValues[p.name] ?? ''} placeholder={p.default ?? ''} oninput={(e) => updateRunParam(p.name, e.currentTarget.value)} />
+              {/if}
+            </label>
+          {/each}
+        </div>
+
+        <div class="run-param-command">
+          <span>执行命令</span>
+          <code>{buildListRunCommand()}</code>
+        </div>
+
+        {#if runParamError}
+          <p class="upload-error">{runParamError}</p>
+        {/if}
+        <div class="upload-actions">
+          <button class="cancel-btn" onclick={closeRunParams}>取消</button>
+          <button class="submit-btn" onclick={confirmRunParams}>确认执行</button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <ConfirmDialog
   open={Boolean(confirmDeleteScript)}
   title="删除用户脚本"
@@ -1218,6 +1456,7 @@
   .modal { width: 400px; max-width: 90vw; max-height: 86vh; background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
   .upload-script-modal { width: min(860px, 94vw); max-height: 90vh; }
   .script-edit-modal { width: min(860px, 92vw); }
+  .run-param-modal { width: min(720px, 94vw); max-height: 88vh; }
   .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border-primary); }
   .modal-header h3 { margin: 0; font-size: 15px; color: var(--text-primary); }
   .modal-close { background: none; border: none; color: var(--text-tertiary); font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
@@ -1255,6 +1494,153 @@
   .file-label { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; border: 2px dashed var(--border-primary); border-radius: 10px; cursor: pointer; transition: all 0.2s; color: var(--text-secondary); }
   .file-label:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
   .upload-error { color: #ef4444; font-size: 12px; margin-bottom: 12px; }
+  .run-param-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .run-param-summary > div {
+    min-width: 0;
+    padding: 10px 11px;
+    border: 1px solid rgba(34, 211, 238, .14);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, .54);
+  }
+  .run-param-summary span {
+    display: block;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 800;
+  }
+  .run-param-summary strong {
+    display: block;
+    min-width: 0;
+    margin-top: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+  .run-mode-tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+  }
+  .run-mode-tabs button {
+    min-height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 800;
+  }
+  .run-mode-tabs button.active {
+    background: rgba(34, 211, 238, .14);
+    color: #67e8f9;
+  }
+  .run-param-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .run-param-field {
+    min-width: 0;
+    display: grid;
+    gap: 6px;
+    padding: 10px;
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    background: rgba(2, 6, 23, .28);
+  }
+  .run-param-field.required {
+    border-color: rgba(251, 113, 133, .28);
+  }
+  .run-param-field > span {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .run-param-field code {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #bfdbfe;
+    font-family: var(--theme-font-family-mono);
+    font-size: 12px;
+  }
+  .run-param-field em,
+  .run-param-field b {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(34, 211, 238, .1);
+    color: #67e8f9;
+    font-style: normal;
+    font-size: 10px;
+  }
+  .run-param-field b {
+    background: rgba(251, 113, 133, .12);
+    color: #fda4af;
+  }
+  .run-param-field small {
+    min-height: 16px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .run-param-field input,
+  .run-param-field select {
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    box-sizing: border-box;
+    border-radius: 8px;
+    border: 1px solid var(--border-primary);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    padding: 0 10px;
+    outline: none;
+  }
+  .run-param-field input:focus,
+  .run-param-field select:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--accent-primary-light);
+  }
+  .run-param-command {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    margin-top: 12px;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(34, 211, 238, .14);
+    background: rgba(2, 6, 23, .42);
+  }
+  .run-param-command span {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    font-weight: 800;
+  }
+  .run-param-command code {
+    min-width: 0;
+    overflow: auto;
+    white-space: nowrap;
+    color: #a7f3d0;
+    font-family: var(--theme-font-family-mono);
+    font-size: 12px;
+  }
   .upload-actions { display: flex; gap: 10px; justify-content: flex-end; }
   .advanced-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; margin: 0 0 12px; padding: 9px 12px; border: 1px solid var(--border-primary); border-radius: 8px; background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer; font-size: 12px; }
   .advanced-toggle:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
@@ -1552,6 +1938,138 @@
     flex-direction: column;
     gap: 12px;
     margin-bottom: 20px;
+  }
+
+  .category-select-filter {
+    position: relative;
+    width: min(360px, 100%);
+  }
+
+  .category-trigger {
+    width: 100%;
+    min-height: 34px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 0 10px;
+    border: 1px solid rgba(34, 211, 238, .20);
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(15, 23, 42, .72), rgba(8, 47, 73, .32));
+    color: var(--text-secondary);
+    text-align: left;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: default;
+  }
+
+  .category-trigger.active,
+  .category-trigger:hover {
+    border-color: rgba(34, 211, 238, .42);
+    color: #67e8f9;
+  }
+
+  .category-trigger span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .category-trigger em {
+    min-width: 28px;
+    height: 20px;
+    display: inline-grid;
+    place-items: center;
+    border-radius: 999px;
+    background: rgba(34, 211, 238, .10);
+    color: #67e8f9;
+    font-family: var(--theme-font-family-mono);
+    font-size: 10px;
+    font-style: normal;
+  }
+
+  .category-trigger b {
+    color: var(--text-tertiary);
+    font-size: 11px;
+  }
+
+  .category-menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 6px);
+    z-index: 60;
+    width: min(420px, calc(100vw - 40px));
+    max-height: 340px;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid rgba(34, 211, 238, .24);
+    border-radius: 12px;
+    background: linear-gradient(145deg, rgba(2, 6, 23, .98), rgba(8, 24, 34, .97));
+    box-shadow: 0 20px 58px rgba(0, 0, 0, .42), inset 0 0 22px rgba(34, 211, 238, .04);
+  }
+
+  .category-search {
+    width: 100%;
+    height: 34px;
+    box-sizing: border-box;
+    margin-bottom: 8px;
+    padding: 0 10px;
+    border: 1px solid rgba(34, 211, 238, .20);
+    border-radius: 8px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    outline: none;
+    cursor: text;
+  }
+
+  .category-search:focus {
+    border-color: rgba(34, 211, 238, .48);
+    box-shadow: 0 0 0 3px rgba(34, 211, 238, .10);
+  }
+
+  .category-option {
+    width: 100%;
+    min-height: 32px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 4px;
+    padding: 0 9px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    text-align: left;
+    cursor: default;
+  }
+
+  .category-option:hover,
+  .category-option.active {
+    border-color: rgba(34, 211, 238, .25);
+    background: rgba(34, 211, 238, .08);
+    color: #e0f2fe;
+  }
+
+  .category-option span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+  }
+
+  .category-option em {
+    color: var(--text-tertiary);
+    font-family: var(--theme-font-family-mono);
+    font-size: 10px;
+    font-style: normal;
+  }
+
+  .category-empty {
+    padding: 20px 8px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    text-align: center;
   }
 
   .search-wrap {
@@ -2481,8 +2999,8 @@
     overflow-y: visible;
     overscroll-behavior-x: contain;
     padding-bottom: 4px;
-    --script-list-columns: 58px minmax(170px, .72fr) minmax(260px, 1fr) 92px 130px 150px 96px 132px 104px minmax(210px, 230px);
-    --script-list-min-width: 1380px;
+    --script-list-columns: 58px minmax(160px, .72fr) minmax(240px, 1fr) 86px 92px 120px 146px 90px 72px 132px 92px minmax(210px, 230px);
+    --script-list-min-width: 1490px;
   }
 
   .scripts-list-head {
@@ -3155,8 +3673,8 @@
   }
 
   .scripts-list {
-    --script-list-columns: 42px 126px minmax(148px, 1fr) 60px 74px 102px 60px 42px 142px 52px 130px;
-    --script-list-min-width: 1032px;
+    --script-list-columns: 42px 124px minmax(140px, 1fr) 56px 72px 72px 98px 60px 42px 142px 52px 130px;
+    --script-list-min-width: 1090px;
     gap: 4px;
     padding-bottom: 6px;
     overflow-x: auto;
@@ -3236,6 +3754,7 @@
   }
 
   .row-status-cell,
+  .row-source,
   .row-exec-count,
   .row-time-cell {
     justify-content: center !important;

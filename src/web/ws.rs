@@ -26,7 +26,9 @@ const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Debug, Deserialize)]
 pub struct WsRunRequest {
     pub action: String,
+    #[serde(default)]
     pub params: HashMap<String, String>,
+    #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
@@ -141,7 +143,7 @@ async fn handle_socket(socket: WebSocket, script_id: String, state: AppState) {
                         }
                         exec_args.extend(req.args.iter().cloned());
 
-                        let mut envs = HashMap::new();
+                        let mut envs = executor::parameter_environment(&req.params);
                         envs.insert("COLUMNS".to_string(), "300".to_string());
                         state.db.insert_exec_with_inputs(
                             &script.id,
@@ -1321,6 +1323,10 @@ fn text_preview_from_bytes(payload: &[u8]) -> String {
         return finalize_text_preview(&lossy, payload.len(), limit);
     }
 
+    if let Some(plain) = printable_payload_text(bytes, payload.len(), limit) {
+        return plain;
+    }
+
     format!(
         "<binary payload: {} bytes, not safe text>\nHEX {}\nASCII {}{}",
         payload.len(),
@@ -1350,6 +1356,42 @@ fn finalize_text_preview(text: &str, original_len: usize, limit: usize) -> Strin
         cleaned.push_str(&format!("\n<truncated {} bytes>", original_len - limit));
     }
     cleaned
+}
+
+fn printable_payload_text(bytes: &[u8], original_len: usize, limit: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut last_space = false;
+    let mut printable = 0usize;
+    for &byte in bytes {
+        let ch = match byte {
+            b'\r' | b'\n' | b'\t' => char::from(byte),
+            0x20..=0x7e => char::from(byte),
+            _ => {
+                if !last_space {
+                    out.push(' ');
+                    last_space = true;
+                }
+                continue;
+            }
+        };
+        printable += 1;
+        last_space = ch == ' ';
+        out.push(ch);
+    }
+    let cleaned = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if printable < 8 || cleaned.len() < 8 {
+        return None;
+    }
+    let ratio = printable as f32 / bytes.len().max(1) as f32;
+    if ratio < 0.18 && cleaned.split_whitespace().count() < 2 {
+        return None;
+    }
+    Some(finalize_text_preview(&cleaned, original_len, limit))
 }
 
 fn readable_ratio(text: &str) -> f32 {
@@ -2126,6 +2168,31 @@ mod tests {
     }
 
     #[test]
+    fn raw_payload_preview_extracts_plaintext_from_mixed_tcp_udp_payloads() {
+        let mut mixed = (0u8..=31).collect::<Vec<_>>();
+        mixed.extend_from_slice(b"cmd=SET user:7 status=ok\ntrace_id=abc-123");
+        mixed.extend_from_slice(&[0xff, 0xfe, 0xfd, 0x00, 0x01, 0x02, 0x03]);
+        let tcp = parse_linux_packet(
+            &sample_ipv4_tcp_frame([10, 0, 0, 8], [10, 0, 0, 9], 55312, 9000, &mixed),
+            11,
+        )
+        .unwrap();
+        let udp = parse_linux_packet(
+            &sample_ipv4_udp_frame([10, 0, 0, 8], [10, 0, 0, 9], 55312, 9001, &mixed),
+            12,
+        )
+        .unwrap();
+
+        for packet in [tcp, udp] {
+            let raw = packet["raw"].as_str().unwrap();
+            assert!(raw.contains("cmd=SET user:7 status=ok"));
+            assert!(raw.contains("trace_id=abc-123"));
+            assert!(!raw.contains("HEX "));
+            assert!(!raw.contains("base64"));
+        }
+    }
+
+    #[test]
     fn tls_client_hello_is_marked_as_https_encrypted() {
         let payload = sample_tls_client_hello("example.com");
         let frame = sample_ipv4_tcp_frame([10, 0, 0, 8], [93, 184, 216, 34], 55312, 443, &payload);
@@ -2291,6 +2358,9 @@ async fn handle_dashboard_socket(socket: WebSocket, state: AppState) {
                         "memory_total": sys.memory_total,
                         "memory_used": sys.memory_used,
                         "memory_usage": sys.memory_usage,
+                        "swap_total": sys.swap_total,
+                        "swap_used": sys.swap_used,
+                        "swap_usage": sys.swap_usage,
                         "disk_total": sys.disk_total,
                         "disk_used": sys.disk_used,
                         "disk_usage": sys.disk_usage,
@@ -2306,6 +2376,7 @@ async fn handle_dashboard_socket(socket: WebSocket, state: AppState) {
                         "kernel": sys.kernel,
                         "arch": sys.arch,
                         "uptime": sys.uptime,
+                        "boot_time": sys.boot_time,
                         "process_count": sys.process_count,
                         "networks": sys.networks.iter().map(|n| {
                             serde_json::json!({
