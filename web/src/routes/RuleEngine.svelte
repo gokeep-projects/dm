@@ -389,15 +389,15 @@
             </label>
             <label>
               <span>分类</span>
-              <input value={selected.category || ''} readonly={!selected.custom} oninput={(e) => updateSelected('category', e.currentTarget.value)} />
+              <input value={selected.category || ''} oninput={(e) => updateSelected('category', e.currentTarget.value)} />
             </label>
             <label>
               <span>目标</span>
-              <input value={selected.target || ''} readonly={!selected.custom} oninput={(e) => updateSelected('target', e.currentTarget.value)} />
+              <input value={selected.target || ''} oninput={(e) => updateSelected('target', e.currentTarget.value)} />
             </label>
             <label>
               <span>条件</span>
-              <input value={selected.condition || ''} readonly={!selected.custom} oninput={(e) => updateSelected('condition', e.currentTarget.value)} />
+              <input value={selected.condition || ''} oninput={(e) => updateSelected('condition', e.currentTarget.value)} />
             </label>
           </div>
 

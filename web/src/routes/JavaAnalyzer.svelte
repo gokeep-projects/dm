@@ -129,7 +129,7 @@
     ['parse', '生成方法剖析、诊断结论与线程模型'],
   ];
 
-  let selectedProcess = $derived.by(() => processes.find((p) => p.pid === selectedPid) || processes[0] || null);
+  let selectedProcess = $derived.by(() => processes.find((p) => p.pid === selectedPid) || null);
   let processRows = $derived.by(() => {
     const q = query.trim().toLowerCase();
     return processes.filter((p) => {
@@ -337,7 +337,7 @@
 
   onMount(() => {
     pageLeaving = false;
-    loadProcesses();
+    loadProcesses(false);
     processPoll = setInterval(() => {
       if (!analyzing) loadProcesses(false, true);
     }, 5000);
@@ -1189,7 +1189,7 @@
   function openProcessMenu(event = null) {
     event?.stopPropagation?.();
     showProcessMenu = true;
-    if (!processes.length && !loading) loadProcesses(true);
+    if (!processes.length && !loading) loadProcesses(false);
     tick().then(() => processInput?.focus());
   }
 
@@ -1418,7 +1418,7 @@
         <div class="process-menu" role="listbox">
           <div class="process-menu-head">
             <span>{loading ? '正在扫描...' : `${processRows.length}/${processes.length} 个 Java 进程`}</span>
-            <button type="button" onclick={(event) => { event.stopPropagation(); loadProcesses(true); }}>重新扫描</button>
+            <button type="button" onclick={(event) => { event.stopPropagation(); loadProcesses(false); }}>重新扫描</button>
           </div>
           {#each processRows as p}
             <button type="button" class="process-option" class:active={p.pid === selectedPid} onclick={(event) => { event.stopPropagation(); selectProcess(p); }}>
@@ -1994,7 +1994,8 @@
     background-size: 24px 24px;
   }
 
-  .java-profiler button { cursor: default; }
+  .java-profiler button { cursor: pointer; }
+  .java-profiler button:disabled { cursor: not-allowed; }
   .java-profiler input { cursor: text; }
 
   .command-bar,

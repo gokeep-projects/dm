@@ -2335,6 +2335,9 @@ async fn handle_dashboard_socket(socket: WebSocket, state: AppState) {
                     serde_json::json!({
                         "pid": p.pid,
                         "name": p.name,
+                        "path": p.path.clone(),
+                        "status": p.status.clone(),
+                        "ports": p.ports.clone(),
                         "cpu_usage": p.cpu_usage,
                         "memory_bytes": p.memory_bytes,
                     })

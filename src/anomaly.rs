@@ -2755,6 +2755,7 @@ mod tests {
                 pid: 42,
                 name: "java".to_string(),
                 path: "/usr/bin/java".to_string(),
+                status: "运行(R)".to_string(),
                 ports: vec!["tcp:8080".to_string()],
                 cpu_usage: 90.0,
                 memory_bytes: 10,

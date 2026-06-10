@@ -1291,8 +1291,8 @@
   .iface-option.active { border-color: rgba(45,212,191,.46); background: rgba(20,184,166,.14); }
   .iface-option small { grid-column: 2 / -1; color: #64748b; font-family: var(--theme-font-family-mono); font-size: 10px; }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
-  button { min-height: 29px; border-radius: 8px; padding: 0 10px; font-size: 12px; font-weight: 900; cursor: default; }
-  button:disabled { opacity: .45; cursor: default; }
+  button { min-height: 29px; border-radius: 8px; padding: 0 10px; font-size: 12px; font-weight: 900; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
   .primary { border: 0; color: #032018; background: linear-gradient(135deg, #5eead4, #facc15); }
   .danger { border: 1px solid rgba(248,113,113,.36); background: rgba(127,29,29,.32); color: #fecaca; }
   .secondary { border: 1px solid rgba(94,234,212,.18); background: rgba(20,184,166,.08); color: #99f6e4; }

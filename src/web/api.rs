@@ -628,7 +628,14 @@ pub async fn dashboard_metrics(
 ) -> Json<serde_json::Value> {
     state.db.cleanup_metric_history();
     let minutes = query.minutes.unwrap_or(30).clamp(3, 120);
-    let points = state.db.get_metric_history(minutes);
+    let mut points = state.db.get_metric_history(minutes);
+    if points.is_empty() {
+        let sys = tokio::task::spawn_blocking(crate::dashboard::get_system_info)
+            .await
+            .unwrap_or_else(|_| crate::dashboard::get_system_info());
+        record_metric_sample(&state.db, &sys);
+        points = state.db.get_metric_history(minutes);
+    }
     Json(serde_json::json!({
         "minutes": minutes,
         "retention_minutes": 120,
@@ -637,10 +644,11 @@ pub async fn dashboard_metrics(
     }))
 }
 
-pub async fn system_info(State(_state): State<AppState>) -> Json<crate::dashboard::SystemInfo> {
+pub async fn system_info(State(state): State<AppState>) -> Json<crate::dashboard::SystemInfo> {
     let sys = tokio::task::spawn_blocking(crate::dashboard::get_system_info)
         .await
         .unwrap_or_else(|_| crate::dashboard::get_system_info());
+    record_metric_sample(&state.db, &sys);
     Json(sys)
 }
 
@@ -4075,19 +4083,7 @@ pub async fn list_rules(State(state): State<AppState>) -> Json<serde_json::Value
         {
             if let Some(override_value) = overrides.get(&id) {
                 if let Some(obj) = rule.as_object_mut() {
-                    obj.insert("override".to_string(), override_value.clone());
-                    for key in [
-                        "enabled",
-                        "level",
-                        "title",
-                        "summary",
-                        "suggestion",
-                        "commands",
-                    ] {
-                        if let Some(value) = override_value.get(key) {
-                            obj.insert(key.to_string(), value.clone());
-                        }
-                    }
+                    apply_rule_override_fields(obj, override_value);
                 }
             }
         }
@@ -4106,6 +4102,29 @@ pub async fn list_rules(State(state): State<AppState>) -> Json<serde_json::Value
         "categories": categories,
         "updated_at": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     }))
+}
+
+fn apply_rule_override_fields(
+    rule: &mut serde_json::Map<String, serde_json::Value>,
+    override_value: &serde_json::Value,
+) {
+    rule.insert("override".to_string(), override_value.clone());
+    for key in [
+        "enabled",
+        "level",
+        "title",
+        "summary",
+        "suggestion",
+        "commands",
+        "category",
+        "target",
+        "condition",
+        "description",
+    ] {
+        if let Some(value) = override_value.get(key) {
+            rule.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 pub async fn update_rule(
@@ -4331,6 +4350,10 @@ pub async fn get_service_logs(
     {
         unit_candidates.push(format!("{}.service", safe_name));
     }
+    let systemd_contexts = collect_systemd_log_contexts(&unit_candidates);
+    let effective_pid = query
+        .pid
+        .or_else(|| systemd_contexts.iter().find_map(|ctx| ctx.main_pid));
 
     let mut parts = Vec::new();
     let mut sources = Vec::new();
@@ -4370,7 +4393,7 @@ pub async fn get_service_logs(
             }
         }
     }
-    if let Some(pid) = query.pid {
+    if let Some(pid) = effective_pid {
         tried.push(format!("journal-pid:{}", pid));
         if let Ok(output) = std::process::Command::new("journalctl")
             .args(["_PID", &pid.to_string(), "-n", "160", "--no-pager"])
@@ -4394,9 +4417,28 @@ pub async fn get_service_logs(
         tried.push(format!("cache:{}:{}", source, updated_at));
         push_log_candidate(&mut preferred_paths, path);
     }
+    for ctx in &systemd_contexts {
+        for source in &ctx.sources {
+            tried.push(format!("systemd-show:{}:{}", ctx.unit, source));
+        }
+        for path in &ctx.log_paths {
+            push_log_candidate(&mut preferred_paths, path);
+        }
+        if let Some(exec_start) = ctx.exec_start.as_deref() {
+            for path in infer_service_log_paths(
+                &safe_name,
+                ctx.main_pid.or(effective_pid),
+                Some(exec_start),
+                query.category.as_deref(),
+                Some(&process_name),
+            ) {
+                push_log_candidate(&mut preferred_paths, path);
+            }
+        }
+    }
     let inferred_paths = infer_service_log_paths(
         &safe_name,
-        query.pid,
+        effective_pid,
         query.path.as_deref(),
         query.category.as_deref(),
         Some(&process_name),
@@ -4464,6 +4506,93 @@ fn service_process_candidate(name: &str) -> String {
     }
 }
 
+#[derive(Debug, Default)]
+struct SystemdLogContext {
+    unit: String,
+    main_pid: Option<u32>,
+    exec_start: Option<String>,
+    log_paths: Vec<String>,
+    sources: Vec<String>,
+}
+
+fn collect_systemd_log_contexts(units: &[String]) -> Vec<SystemdLogContext> {
+    units
+        .iter()
+        .filter_map(|unit| {
+            let output = std::process::Command::new("systemctl")
+                .args([
+                    "show",
+                    unit,
+                    "--property=MainPID,ExecStart,FragmentPath,LogsDirectory,StandardOutput,StandardError",
+                    "--no-pager",
+                ])
+                .output()
+                .ok()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut ctx = SystemdLogContext {
+                unit: unit.clone(),
+                ..Default::default()
+            };
+            for line in text.lines() {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let value = value.trim();
+                if value.is_empty() || value == "0" {
+                    continue;
+                }
+                match key {
+                    "MainPID" => {
+                        ctx.main_pid = value.parse::<u32>().ok();
+                        if ctx.main_pid.is_some() {
+                            ctx.sources.push(format!("MainPID={}", value));
+                        }
+                    }
+                    "ExecStart" => {
+                        ctx.exec_start = Some(value.to_string());
+                        ctx.sources.push("ExecStart".to_string());
+                    }
+                    "FragmentPath" => {
+                        ctx.sources.push(format!("FragmentPath={}", value));
+                    }
+                    "LogsDirectory" => {
+                        for item in value.split_whitespace() {
+                            let dir = if item.starts_with('/') {
+                                item.to_string()
+                            } else {
+                                format!("/var/log/{}", item.trim_matches('/'))
+                            };
+                            push_log_candidate(&mut ctx.log_paths, format!("{}/{}.log", dir, unit));
+                            push_log_candidate(&mut ctx.log_paths, format!("{}/error.log", dir));
+                            push_log_candidate(&mut ctx.log_paths, format!("{}/access.log", dir));
+                        }
+                        ctx.sources.push(format!("LogsDirectory={}", value));
+                    }
+                    "StandardOutput" | "StandardError" => {
+                        if let Some(path) = value.strip_prefix("file:") {
+                            push_log_candidate(&mut ctx.log_paths, path);
+                            ctx.sources.push(format!("{}=file", key));
+                        } else if let Some(path) = value.strip_prefix("append:") {
+                            push_log_candidate(&mut ctx.log_paths, path);
+                            ctx.sources.push(format!("{}=append", key));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if ctx.main_pid.is_some()
+                || ctx.exec_start.is_some()
+                || !ctx.log_paths.is_empty()
+                || !ctx.sources.is_empty()
+            {
+                Some(ctx)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn infer_service_log_paths(
     name: &str,
     pid: Option<u32>,
@@ -4516,36 +4645,55 @@ fn infer_service_log_paths(
     if let Some(cmd) = cmd {
         let mut prev = "";
         for raw in cmd.split_whitespace() {
-            let token = raw.trim_matches('"').trim_matches('\'');
+            let token = raw
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches(';')
+                .trim_matches(']');
+            if token.starts_with('/') {
+                add_executable_nearby_log_candidates(&mut paths, token, &name, &process_name);
+            }
             if token.ends_with(".log") {
                 push_log_candidate(&mut paths, token);
             }
             if matches!(
                 prev,
-                "-log" | "--log" | "--log-file" | "--logfile" | "-Dlogging.file" | "-Dlogging.path"
+                "-log"
+                    | "--log"
+                    | "--log-file"
+                    | "--logfile"
+                    | "--log.path"
+                    | "--log.dir"
+                    | "--log-directory"
+                    | "--logging.path"
+                    | "--logging.file.name"
+                    | "--logging.file.path"
+                    | "-Dlogging.file"
+                    | "-Dlogging.path"
             ) {
-                push_log_candidate(&mut paths, token);
+                add_log_path_or_dir_candidate(&mut paths, token, &name, &process_name);
             }
             if let Some(value) = token
                 .strip_prefix("--log-file=")
                 .or_else(|| token.strip_prefix("--logfile="))
+                .or_else(|| token.strip_prefix("--log.path="))
+                .or_else(|| token.strip_prefix("--logging.file.name="))
                 .or_else(|| token.strip_prefix("-Dlogging.file="))
                 .or_else(|| token.strip_prefix("-Dlogging.file.name="))
             {
                 push_log_candidate(&mut paths, value);
             }
             if let Some(dir) = token
-                .strip_prefix("-Dlogging.path=")
+                .strip_prefix("--log-dir=")
+                .or_else(|| token.strip_prefix("--log.dir="))
+                .or_else(|| token.strip_prefix("--log-directory="))
+                .or_else(|| token.strip_prefix("--logging.path="))
+                .or_else(|| token.strip_prefix("--logging.file.path="))
                 .or_else(|| token.strip_prefix("-Dlogging.file.path="))
+                .or_else(|| token.strip_prefix("-Dlogging.path="))
+                .or_else(|| token.strip_prefix("-Dserver.tomcat.accesslog.directory="))
             {
-                push_log_candidate(
-                    &mut paths,
-                    format!("{}/{}.log", dir.trim_end_matches('/'), name),
-                );
-                push_log_candidate(
-                    &mut paths,
-                    format!("{}/error.log", dir.trim_end_matches('/')),
-                );
+                add_log_path_or_dir_candidate(&mut paths, dir, &name, &process_name);
             }
             if token.contains("/logs/") {
                 if token.ends_with(".log") {
@@ -4599,6 +4747,95 @@ fn infer_service_log_paths(
         }
     }
     paths
+}
+
+fn add_log_path_or_dir_candidate(
+    paths: &mut Vec<String>,
+    value: &str,
+    name: &str,
+    process_name: &str,
+) {
+    if value.ends_with(".log") {
+        push_log_candidate(paths, value);
+        return;
+    }
+    let dir = value.trim_end_matches('/');
+    push_log_candidate(paths, format!("{}/{}.log", dir, name));
+    push_log_candidate(paths, format!("{}/{}.log", dir, process_name));
+    push_log_candidate(paths, format!("{}/error.log", dir));
+    push_log_candidate(paths, format!("{}/access.log", dir));
+}
+
+fn add_executable_nearby_log_candidates(
+    paths: &mut Vec<String>,
+    value: &str,
+    name: &str,
+    process_name: &str,
+) {
+    if value.ends_with(".log") || value.contains("/logs/") {
+        add_log_path_or_dir_candidate(paths, value, name, process_name);
+        return;
+    }
+    let path = std::path::Path::new(value);
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    for candidate_dir in [
+        dir.join("logs"),
+        dir.parent()
+            .map(|parent| parent.join("logs"))
+            .unwrap_or_else(|| dir.join("logs")),
+        dir.join("../logs"),
+    ] {
+        let candidate_dir = candidate_dir.display().to_string();
+        add_log_path_or_dir_candidate(paths, &candidate_dir, name, process_name);
+    }
+}
+
+fn normalize_process_status(stat: &str) -> String {
+    let code = stat.chars().next();
+    let label = match code {
+        Some('R') => "运行",
+        Some('S') => "睡眠",
+        Some('D') => "等待IO",
+        Some('T') | Some('t') => "停止",
+        Some('Z') => "僵尸",
+        Some('I') => "空闲",
+        Some('W') => "分页",
+        Some('X') | Some('x') => "结束中",
+        Some('K') => "唤醒中",
+        Some('P') => "暂停",
+        _ => "未知",
+    };
+    if stat.trim().is_empty() {
+        label.to_string()
+    } else {
+        format!("{}({})", label, stat)
+    }
+}
+
+fn infer_process_path(pid: u32, cmd: &str, name: &str) -> String {
+    if let Ok(path) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
+        let path = path.display().to_string();
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    let first = cmd.split_whitespace().next().unwrap_or_default();
+    if first.starts_with('/') {
+        return first
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim_end_matches(":")
+            .to_string();
+    }
+    if !cmd.trim().is_empty() {
+        cmd.trim().to_string()
+    } else if !name.trim().is_empty() {
+        name.trim().to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 pub async fn check_service_health(
@@ -5133,15 +5370,13 @@ pub async fn get_all_processes(State(_state): State<AppState>) -> Json<serde_jso
                 .unwrap_or(0);
             let stat = parts.next().unwrap_or_default();
             let cmd = parts.collect::<Vec<_>>().join(" ");
-            let status = if stat.starts_with('R') {
-                "运行中"
-            } else {
-                "休眠"
-            };
+            let status = normalize_process_status(stat);
+            let path = infer_process_path(pid, &cmd, &name);
             Some(serde_json::json!({
                 "pid": pid,
                 "name": name,
                 "cmd": cmd,
+                "path": path,
                 "cpu_usage": cpu_usage,
                 "memory_bytes": rss_kb.saturating_mul(1024),
                 "status": status,
@@ -5307,6 +5542,64 @@ mod tests {
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0]["rule_id"], "custom.redis.memory");
         assert_eq!(matched[0]["level"], "warn");
+    }
+
+    #[test]
+    fn rule_override_merges_editable_metadata_fields() {
+        let mut rule = serde_json::json!({
+            "id": "resource.cpu.warning",
+            "title": "CPU 默认",
+            "category": "resource",
+            "target": "cpu",
+            "condition": "cpu > 80",
+            "description": "默认描述"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let override_value = serde_json::json!({
+            "title": "CPU 自定义",
+            "category": "runtime",
+            "target": "java",
+            "condition": "cpu > 70 && thread blocked",
+            "description": "刷新后必须继续显示的编辑内容"
+        });
+
+        apply_rule_override_fields(&mut rule, &override_value);
+
+        assert_eq!(rule["title"], "CPU 自定义");
+        assert_eq!(rule["category"], "runtime");
+        assert_eq!(rule["target"], "java");
+        assert_eq!(rule["condition"], "cpu > 70 && thread blocked");
+        assert_eq!(rule["description"], "刷新后必须继续显示的编辑内容");
+        assert_eq!(rule["override"]["target"], "java");
+    }
+
+    #[test]
+    fn process_status_keeps_real_ps_state_codes() {
+        assert_eq!(normalize_process_status("Rsl"), "运行(Rsl)");
+        assert_eq!(normalize_process_status("Ss"), "睡眠(Ss)");
+        assert_eq!(normalize_process_status("D"), "等待IO(D)");
+        assert_eq!(normalize_process_status("Z+"), "僵尸(Z+)");
+        assert_eq!(normalize_process_status(""), "未知");
+    }
+
+    #[test]
+    fn service_log_inference_uses_command_flags_and_executable_directory() {
+        let paths = infer_service_log_paths(
+            "demo.service",
+            None,
+            Some("/opt/demo/bin/demo --log.dir=/data/demo/logs --logging.file.name=/tmp/demo/app.log -Dserver.tomcat.accesslog.directory=/var/log/demo"),
+            Some("java"),
+            Some("demo"),
+        );
+
+        assert!(paths.contains(&"/data/demo/logs/demo.log".to_string()));
+        assert!(paths.contains(&"/data/demo/logs/error.log".to_string()));
+        assert!(paths.contains(&"/tmp/demo/app.log".to_string()));
+        assert!(paths.contains(&"/var/log/demo/access.log".to_string()));
+        assert!(paths.contains(&"/opt/demo/bin/logs/demo.log".to_string()));
+        assert!(paths.contains(&"/opt/demo/logs/demo.log".to_string()));
     }
 
     #[test]

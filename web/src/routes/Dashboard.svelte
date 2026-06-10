@@ -63,6 +63,66 @@
     { value: 60, label: '60s' },
   ];
 
+  function isObject(value) {
+    return value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function hasSystemPayload(value) {
+    return isObject(value) && (
+      value.hostname ||
+      value.os ||
+      Number(value.cpu_count || 0) > 0 ||
+      Number(value.memory_total || 0) > 0 ||
+      Number(value.process_count || 0) > 0
+    );
+  }
+
+  function mergeTopProcesses(nextRows, prevRows = []) {
+    if (!Array.isArray(nextRows) || nextRows.length === 0) return prevRows;
+    const prevByPid = new Map((prevRows || []).map(p => [String(p.pid), p]));
+    return nextRows.map(row => {
+      const prev = prevByPid.get(String(row.pid)) || {};
+      return {
+        ...prev,
+        ...row,
+        path: row.path || prev.path || row.cmd || prev.cmd || row.exe_path || prev.exe_path || row.name || prev.name || 'unknown',
+        status: row.status || prev.status || '未知',
+        ports: Array.isArray(row.ports) && row.ports.length ? row.ports : (prev.ports || []),
+      };
+    });
+  }
+
+  function mergeSystemPayload(next) {
+    if (!hasSystemPayload(next)) return;
+    const prev = sys || {};
+    sys = {
+      ...prev,
+      ...next,
+      load_avg: isObject(next.load_avg) ? { ...(prev.load_avg || {}), ...next.load_avg } : prev.load_avg,
+      networks: Array.isArray(next.networks) && next.networks.length ? next.networks : (prev.networks || []),
+      disks: Array.isArray(next.disks) && next.disks.length ? next.disks : (prev.disks || []),
+      top_processes: mergeTopProcesses(next.top_processes, prev.top_processes),
+    };
+    recordMetricSample(sys);
+  }
+
+  function mergeStatsPayload(next) {
+    if (!isObject(next)) return;
+    const prev = stats || {};
+    stats = {
+      ...prev,
+      ...next,
+      categories: isObject(next.categories) ? next.categories : (prev.categories || {}),
+      recent_execs: Array.isArray(next.recent_execs) ? next.recent_execs : (prev.recent_execs || []),
+    };
+  }
+
+  function updateListIfReady(payload, key, current) {
+    const rows = payload?.[key];
+    if (Array.isArray(rows) && (rows.length > 0 || current.length === 0)) return rows;
+    return current;
+  }
+
   function setRefreshInterval(val) {
     refreshInterval = val;
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
@@ -79,10 +139,9 @@
       try {
         const d = JSON.parse(e.data);
         if (d.type === 'update') {
-          sys = d.system;
-          stats = d.stats;
-          scripts = d.scripts || scripts;
-          recordMetricSample(sys);
+          mergeSystemPayload(d.system);
+          mergeStatsPayload(d.stats);
+          scripts = updateListIfReady(d, 'scripts', scripts);
           lastUpdate = new Date();
           updateCount++;
           lastUpdateText = '刚刚';
@@ -107,13 +166,10 @@
         fetch('/api/scripts').then(r => r.ok ? r.json() : null),
         fetch('/api/checks').then(r => r.ok ? r.json() : null),
       ]);
-      if (s) stats = s;
-      if (i) {
-        sys = i;
-        recordMetricSample(sys);
-      }
-      if (sc) scripts = sc.scripts || [];
-      if (ck) checks = ck.checks || [];
+      mergeStatsPayload(s);
+      mergeSystemPayload(i);
+      if (sc) scripts = updateListIfReady(sc, 'scripts', scripts);
+      if (ck) checks = updateListIfReady(ck, 'checks', checks);
     } catch (e) { console.warn('加载仪表盘数据失败:', e); }
     lastUpdate = new Date();
     updateCount++;
@@ -186,26 +242,44 @@
       const d = await r.json();
       if (seq !== metricRequestSeq || minutes !== trendMinutes) return;
       const cutoff = rangeEnd - minutes * 60 * 1000;
-      metricHistory = (d.points || []).map(p => ({
-        t: Number(p.ts_ms || 0),
-        timestamp: p.timestamp,
-        cpu: Number(p.cpu_usage || 0),
-        mem: Number(p.memory_usage || 0),
-        load: Number(p.load_ratio || 0),
-        load_one: Number(p.load_one || 0),
-        rx: Number(p.rx_bytes || 0),
-        tx: Number(p.tx_bytes || 0),
-      })).filter(p => p.t >= cutoff);
+      const points = (d.points || []).map(normalizeMetricPoint).filter(p => p.t >= cutoff);
+      if (points.length === 0) {
+        if (metricHistory.length === 0 && sys) recordMetricSample(sys, true);
+        return;
+      }
+      mergeMetricHistory(points, cutoff);
     } catch (_) {
     } finally {
       if (showLoading && seq === metricRequestSeq) trendLoading = false;
     }
   }
 
-  function recordMetricSample(system) {
+  function normalizeMetricPoint(p) {
+    return {
+      t: Number(p.ts_ms || p.t || 0),
+      timestamp: p.timestamp,
+      cpu: Number(p.cpu_usage ?? p.cpu ?? 0),
+      mem: Number(p.memory_usage ?? p.mem ?? 0),
+      load: Number(p.load_ratio ?? p.load ?? 0),
+      load_one: Number(p.load_one ?? p.load ?? 0),
+      rx: Number(p.rx_bytes ?? p.rx ?? 0),
+      tx: Number(p.tx_bytes ?? p.tx ?? 0),
+    };
+  }
+
+  function mergeMetricHistory(points, cutoff = trendRangeStart()) {
+    const byTs = new Map();
+    for (const point of [...metricHistory, ...points]) {
+      if (!point?.t || point.t < cutoff) continue;
+      byTs.set(String(point.t), normalizeMetricPoint(point));
+    }
+    metricHistory = [...byTs.values()].sort((a, b) => a.t - b.t).slice(-520);
+  }
+
+  function recordMetricSample(system, force = false) {
     if (!system) return;
     const now = Date.now();
-    if (lastMetricSampleAt && now - lastMetricSampleAt < SAMPLE_MIN_MS) return;
+    if (!force && lastMetricSampleAt && now - lastMetricSampleAt < SAMPLE_MIN_MS) return;
     lastMetricSampleAt = now;
     trendRangeEnd = now;
     const totals = networkTotals(system);
@@ -219,7 +293,7 @@
       tx: totals.tx,
     };
     const cutoff = trendRangeStart();
-    metricHistory = [...metricHistory.filter(p => p.t >= cutoff), point].slice(-520);
+    mergeMetricHistory([point], cutoff);
   }
 
   async function setTrendMinutes(value) {
@@ -254,6 +328,7 @@
   function networkRatePoints(key) {
     const points = [];
     const history = windowedMetricHistory();
+    if (history.length === 1) return [{ t: history[0].t, value: 0 }];
     for (let i = 1; i < history.length; i++) {
       const prev = history[i - 1];
       const cur = history[i];
@@ -269,11 +344,13 @@
     const maxValue = Math.max(1, ...points.map(p => p.value));
     const pad = 10;
     const start = trendRangeStart();
-    return points.map(p => {
+    const coords = points.map(p => {
       const x = pad + Math.max(0, Math.min(1, (p.t - start) / trendWindowMs())) * (width - pad * 2);
       const y = pad + (1 - Math.max(0, Math.min(1, p.value / maxValue))) * (height - pad * 2);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
+    });
+    if (coords.length === 1) coords.push(`${(width - pad).toFixed(1)},${coords[0].split(',')[1]}`);
+    return coords.join(' ');
   }
 
   function latestRate(key) {
@@ -380,10 +457,9 @@
     if (key === 'pid') return Number(p.pid || 0);
     if (key === 'cpu_usage') return Number(p.cpu_usage || 0);
     if (key === 'memory_bytes') return Number(p.memory_bytes || 0);
-    if (key === 'status') return p.status || '';
+    if (key === 'status') return procStatus(p);
     if (key === 'cmd') return p.cmd || p.name || '';
     if (key === 'path') return procPath(p);
-    if (key === 'ports') return procPorts(p);
     return p.name || '';
   }
 
@@ -436,13 +512,15 @@
   }
 
   function procPath(p) {
-    return p?.path || p?.cmd || p?.exe_path || '-';
+    return p?.path || p?.cmd || p?.exe_path || p?.name || 'unknown';
   }
 
-  function procPorts(p) {
-    const ports = Array.isArray(p?.ports) ? p.ports : [];
-    if (ports.length) return ports.join(', ');
-    return p?.ports || '-';
+  function procStatus(p) {
+    return p?.pid || p?.name ? '正常' : '未知';
+  }
+
+  function procStatusDetail(p) {
+    return p?.status ? `进程存在，调度态: ${p.status}` : procStatus(p);
   }
 
   function networkKind(n) {
@@ -845,7 +923,7 @@
           <span class="proc-col-rank">#</span>
           <button type="button" class="proc-sort proc-col-name" onclick={() => changeTopProcessSort('name')}>名称{sortMark(topProcessSortKey, topProcessSortDir, 'name')}</button>
           <button type="button" class="proc-sort proc-col-path" onclick={() => changeTopProcessSort('path')}>路径{sortMark(topProcessSortKey, topProcessSortDir, 'path')}</button>
-          <button type="button" class="proc-sort proc-col-ports" onclick={() => changeTopProcessSort('ports')}>端口{sortMark(topProcessSortKey, topProcessSortDir, 'ports')}</button>
+          <button type="button" class="proc-sort proc-col-status" onclick={() => changeTopProcessSort('status')}>状态{sortMark(topProcessSortKey, topProcessSortDir, 'status')}</button>
           <button type="button" class="proc-sort proc-col-cpu" onclick={() => changeTopProcessSort('cpu_usage')}>CPU{sortMark(topProcessSortKey, topProcessSortDir, 'cpu_usage')}</button>
           <button type="button" class="proc-sort proc-col-mem" onclick={() => changeTopProcessSort('memory_bytes')}>内存{sortMark(topProcessSortKey, topProcessSortDir, 'memory_bytes')}</button>
         </div>
@@ -855,7 +933,7 @@
               <span class="proc-col-rank">{i + 1}</span>
               <span class="proc-col-name" title={p.name}>{p.name}</span>
               <span class="proc-col-path" title={procPath(p)}>{procPath(p)}</span>
-              <span class="proc-col-ports" title={procPorts(p)}>{procPorts(p)}</span>
+              <span class="proc-col-status" title={procStatusDetail(p)}>{procStatus(p)}</span>
               <span class="proc-col-cpu" style="color:{barColor(p.cpu_usage)}">{p.cpu_usage.toFixed(1)}%</span>
               <span class="proc-col-mem">{fmt(p.memory_bytes)}</span>
             </div>
@@ -931,7 +1009,7 @@
             <span class="col-rank">#</span>
             <button class="process-sort" onclick={() => changeProcessSort('pid')}>PID{sortMark(processSortKey, processSortDir, 'pid')}</button>
             <button class="process-sort" onclick={() => changeProcessSort('name')}>进程名{sortMark(processSortKey, processSortDir, 'name')}</button>
-            <button class="process-sort" onclick={() => changeProcessSort('cmd')}>命令行{sortMark(processSortKey, processSortDir, 'cmd')}</button>
+            <button class="process-sort" onclick={() => changeProcessSort('path')}>路径 / 命令{sortMark(processSortKey, processSortDir, 'path')}</button>
             <button class="process-sort" onclick={() => changeProcessSort('cpu_usage')}>CPU%{sortMark(processSortKey, processSortDir, 'cpu_usage')}</button>
             <button class="process-sort" onclick={() => changeProcessSort('memory_bytes')}>内存{sortMark(processSortKey, processSortDir, 'memory_bytes')}</button>
             <button class="process-sort" onclick={() => changeProcessSort('status')}>状态{sortMark(processSortKey, processSortDir, 'status')}</button>
@@ -942,10 +1020,10 @@
                 <span class="col-rank">{i + 1}</span>
                 <span class="col-pid">{p.pid}</span>
                 <span class="col-name">{p.name}</span>
-                <span class="col-cmd" title={p.cmd || p.name}>{p.cmd || p.name}</span>
+                <span class="col-cmd" title={p.path || p.cmd || p.name}>{p.path || p.cmd || p.name}</span>
                 <span class="col-cpu" style="color:{barColor(p.cpu_usage)}">{p.cpu_usage.toFixed(1)}%</span>
                 <span class="col-mem">{fmt(p.memory_bytes)}</span>
-                <span class="col-status">{p.status || '运行中'}</span>
+                <span class="col-status" title={procStatusDetail(p)}>{procStatus(p)}</span>
               </div>
             {/each}
           </div>
@@ -1144,7 +1222,7 @@
   .proc-section { grid-area: proc; min-height: 0; display: flex; flex-direction: column; }
   .proc-table { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-x: auto; overflow-y: hidden; }
   .proc-header,
-  .proc-row { display: grid; grid-template-columns: 28px minmax(86px, .72fr) minmax(190px, 1.45fr) minmax(82px, .62fr) 58px 78px; align-items: center; gap: 7px; min-width: 650px; }
+  .proc-row { display: grid; grid-template-columns: 28px minmax(86px, .72fr) minmax(260px, 1.7fr) minmax(72px, .5fr) 58px 78px; align-items: center; gap: 7px; min-width: 650px; }
   .proc-header { flex: 0 0 auto; padding: 5px 0 6px; border-bottom: 1px solid rgba(148,163,184,.14); color: var(--text-tertiary); font-size: 10px; font-weight: 900; text-transform: uppercase; }
   .proc-sort { border: none; background: transparent; color: inherit; font: inherit; padding: 0; text-align: left; }
   .proc-list { flex: 1; min-height: 0; min-width: 650px; overflow-y: auto; overflow-x: hidden; padding-right: 3px; }
@@ -1155,10 +1233,10 @@
   .proc-col-rank { color: var(--text-tertiary); font-family: var(--theme-font-family-mono); }
   .proc-col-name,
   .proc-col-path,
-  .proc-col-ports { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proc-col-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .proc-col-name { color: var(--text-primary); font-weight: 800; }
   .proc-col-path { color: var(--text-secondary); font-family: var(--theme-font-family-mono); font-size: 10px; }
-  .proc-col-ports { color: #67e8f9; font-family: var(--theme-font-family-mono); font-size: 10px; font-weight: 800; }
+  .proc-col-status { color: #67e8f9; font-size: 10px; font-weight: 900; }
   .proc-col-cpu,
   .proc-col-mem { font-family: var(--theme-font-family-mono); font-weight: 800; }
   .proc-col-mem { color: var(--text-secondary); }
@@ -1248,7 +1326,7 @@
     .info-rows { gap: 4px; }
     .info-row { min-height: 20px; }
     .proc-header,
-    .proc-row { grid-template-columns: 26px minmax(76px, .7fr) minmax(160px, 1.4fr) minmax(72px, .58fr) 54px 70px; gap: 6px; min-width: 580px; }
+    .proc-row { grid-template-columns: 26px minmax(76px, .7fr) minmax(190px, 1.45fr) minmax(62px, .5fr) 54px 70px; gap: 6px; min-width: 580px; }
     .proc-list { min-width: 580px; }
     .mini-row { grid-template-columns: minmax(56px, .72fr) minmax(58px, .58fr) minmax(88px, 1fr); gap: 6px; }
   }

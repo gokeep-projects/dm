@@ -179,14 +179,14 @@ summary,
 input[type="button"],
 input[type="submit"],
 input[type="file"]::file-selector-button {
-  cursor: default !important;
+  cursor: pointer !important;
 }
 
 button:disabled,
 input:disabled,
 select:disabled,
 [aria-disabled="true"] {
-  cursor: default !important;
+  cursor: not-allowed !important;
 }
 
 input,
@@ -284,11 +284,6 @@ button:focus-visible { outline-offset: 1px; }
   }
 }
 
-html,
-body,
-body *,
-body *::before,
-body *::after,
 body a,
 body button,
 body select,
@@ -297,7 +292,17 @@ body label,
 body [role="button"],
 body input[type="button"],
 body input[type="submit"],
-body input[type="file"]::file-selector-button,
+body input[type="file"]::file-selector-button {
+  cursor: pointer !important;
+}
+
+body button:disabled,
+body input:disabled,
+body select:disabled,
+body [aria-disabled="true"] {
+  cursor: not-allowed !important;
+}
+
 body .drag-scrolling,
 body .resizing-column {
   cursor: default !important;
