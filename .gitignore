@@ -12,5 +12,6 @@
 /offline
 /output
 /.claude
+/.dist
 CLAUDE.md
 .DS_Store
