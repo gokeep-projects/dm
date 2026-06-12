@@ -27,6 +27,8 @@
   let downloadTimer = null;
   let paramValues = $state({});
   let showParams = $state(false);
+  let runMenuOpen = $state(false);
+  let runMenuPos = $state({ top: 0, left: 0 });
   let showSource = $state(false);
   let sourceContent = $state('');
   let sourceMeta = $state(null);
@@ -631,6 +633,32 @@
     }, 100);
   }
 
+  function toggleRunMenu(evt) {
+    if (running) return;
+    evt?.preventDefault?.();
+    evt?.stopPropagation?.();
+    if (runMenuOpen) {
+      runMenuOpen = false;
+      return;
+    }
+    const target = evt?.currentTarget;
+    if (target) {
+      const r = target.getBoundingClientRect();
+      runMenuPos = { top: Math.round(r.bottom + 6), left: Math.round(r.right - 220) };
+    }
+    runMenuOpen = true;
+  }
+
+  function quickRun() {
+    runMenuOpen = false;
+    runScript();
+  }
+
+  function runWithParams() {
+    runMenuOpen = false;
+    openParamsThenRun();
+  }
+
   function runScript(record = null, explicitPayload = null) {
     if (record?.currentTarget || record?.target) record = null;
     const replayId = record?.id !== undefined ? String(record.id) : '';
@@ -874,7 +902,15 @@
     }
   });
 
+  function globalRunMenuClose(event) {
+    if (!runMenuOpen) return;
+    const t = event.target;
+    if (t && t.closest && t.closest('.detail-run-dropdown')) return;
+    runMenuOpen = false;
+  }
+
   onMount(() => {
+    window.addEventListener('mousedown', globalRunMenuClose);
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('keydown', onScriptKeyDown);
     if (termContainer) initTerminal();
@@ -907,6 +943,7 @@
   function onScriptKeyDown(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); if (!running) runScript(); return; }
+    if (e.key === 'Escape' && runMenuOpen) { runMenuOpen = false; return; }
     if ((e.metaKey || e.ctrlKey) && e.key === '.') { e.preventDefault(); if (running) stopScript(); return; }
     if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); location.hash = '#/scripts'; return; }
   }
@@ -979,17 +1016,34 @@
         </svg>
         <span>统计</span>
       </button>
-      <button class="action-btn run-btn" onclick={runScript} disabled={running}>
-        {#if running}
-          <span class="btn-spinner"></span>
-          <span>执行中</span>
-        {:else}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M8 5v14l11-7z"/>
-          </svg>
-          <span>执行</span>
+      <div class="detail-run-dropdown">
+        <button class="action-btn run-btn" onclick={toggleRunMenu} disabled={running} aria-haspopup="menu">
+          {#if running}
+            <span class="btn-spinner"></span>
+            <span>执行中</span>
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+            <span>执行</span>
+            <svg class="run-caret" width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+          {/if}
+        </button>
+        {#if runMenuOpen}
+          <div class="run-menu" role="menu" style="top:{runMenuPos.top}px;left:{runMenuPos.left}px" onclick={(e) => e.stopPropagation()}>
+            <button type="button" class="run-menu-item" role="menuitem" onclick={quickRun}>
+              <span class="run-menu-icon">▶</span>
+              <span class="run-menu-text"><strong>快速执行</strong><em>不带参数，直接运行</em></span>
+            </button>
+            {#if info?.metadata?.params?.length}
+              <button type="button" class="run-menu-item" role="menuitem" onclick={runWithParams}>
+                <span class="run-menu-icon">⚙</span>
+                <span class="run-menu-text"><strong>带参数执行</strong><em>填写 {info.metadata.params.length} 个参数后运行</em></span>
+              </button>
+            {/if}
+          </div>
         {/if}
-      </button>
+      </div>
       {#if running}
         <button class="action-btn stop-btn" onclick={stopScript}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -1603,6 +1657,60 @@
     transition: all 0.2s;
   }
 
+  .detail-run-dropdown { position: relative; display: inline-flex; overflow: visible !important; }
+  .run-caret { margin-left: 4px; opacity: 0.85; transition: transform 0.15s; }
+  .run-btn.active .run-caret { transform: rotate(180deg); }
+
+  .run-menu {
+    position: fixed;
+    z-index: 9999;
+    min-width: 220px;
+    padding: 6px;
+    background: #0f172a;
+    border: 1px solid rgba(34, 211, 238, 0.35);
+    border-radius: 10px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(34, 211, 238, 0.15);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    animation: runMenuIn 0.12s ease-out;
+  }
+  @keyframes runMenuIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .run-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary, #e2e8f0);
+    text-align: left;
+    cursor: pointer;
+    border-radius: 7px;
+    transition: background 0.15s;
+    font: inherit;
+  }
+  .run-menu-item:hover {
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.12), rgba(6, 182, 212, 0.08));
+  }
+  .run-menu-icon {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(34, 211, 238, 0.12);
+    color: #22d3ee;
+    border-radius: 6px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .run-menu-text { display: flex; flex-direction: column; min-width: 0; }
+  .run-menu-text strong { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+  .run-menu-text em { font-size: 10.5px; font-style: normal; color: #94a3b8; margin-top: 1px; }
   .run-btn {
     background: linear-gradient(135deg, #06b6d4, #0891b2);
     color: #fff;

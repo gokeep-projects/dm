@@ -156,6 +156,7 @@ pub fn build_router(config: Config) -> Router {
         )
         .route("/api/files", get(api::list_directory))
         .route("/api/health", get(api::health_check))
+        .route("/api/ping", get(api::ping))
         .route(
             "/api/maintenance",
             get(api::list_maintenance).post(api::create_maintenance),

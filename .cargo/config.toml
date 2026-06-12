@@ -1,2 +1,31 @@
+# 离线 vendor 优先 (CI 不在线时也能 build)
 [source.vendored-sources]
 directory = "offline/cargo/vendor"
+
+# x86_64 musl: 静态链接, 减少运行时依赖
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# aarch64 musl: 静态链接
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.loongarch64-unknown-linux-musl]
+linker = "loongarch64-linux-musl-gcc"
+
+[target.loongarch64-unknown-linux-gnu]
+linker = "loongarch64-linux-gnu-gcc"
+
+[target.mips-unknown-linux-musl]
+linker = "mips-linux-musl-gcc"
+
+[target.mipsel-unknown-linux-musl]
+linker = "mipsel-linux-musl-gcc"
+
+[target.sw_64-unknown-linux-gnu]
+linker = "sw_64-linux-gnu-gcc"

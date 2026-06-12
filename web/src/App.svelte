@@ -39,6 +39,21 @@
   let paletteInput = $state(null);
   let lang = $state('zh');
   let alertCount = $state(0);
+  // 连接状态: 由 /api/ping 心跳驱动
+  let connectStatus = $state('unknown'); // unknown | connected | disconnected
+  // 状态指示器只反映"本平台与后端的连通性", 告警走独立铃铛
+  const systemStatus = $derived(
+    connectStatus === 'disconnected' ? 'disconnected' :
+    connectStatus === 'unknown' ? 'unknown' :
+    'ok'
+  );
+  let lastHeartbeatAt = $state(0);
+  let heartbeatCount = $state(0);
+  let heartbeatTimer = null;
+  let heartbeatToken = 0;
+  const HEARTBEAT_TIMEOUT_MS = 6000;
+  const HEARTBEAT_INTERVAL_MS = 3000;
+
   let showAlerts = $state(false);
   let alerts = $state([]);
   let alertsLoading = $state(false);
@@ -49,11 +64,6 @@
 
   function navigate(target) {
     location.hash = '#/' + target;
-  }
-
-  function toggleLang() {
-    lang = lang === 'zh' ? 'en' : 'zh';
-    localStorage.setItem('dm-lang', lang);
   }
 
   async function loadAlerts() {
@@ -83,6 +93,68 @@
   function firstEvidence(alert) {
     const ev = alert.evidence || [];
     return ev.length ? ev[0] : '';
+  }
+
+  /// 一次心跳: 先 ping (验证后端可达), 再拉告警统计 (决定 status 颜色)
+  /// 任何一次成功都触发一次"闪动"动画, 失败则标红
+  async function sendHeartbeat() {
+    const token = ++heartbeatToken;
+    try {
+      const pingCtrl = new AbortController();
+      const pingTimer = setTimeout(() => pingCtrl.abort(), HEARTBEAT_TIMEOUT_MS);
+      const r = await fetch('/api/ping?ts=' + Date.now(), {
+        cache: 'no-store',
+        signal: pingCtrl.signal,
+      });
+      clearTimeout(pingTimer);
+      if (token !== heartbeatToken) return;
+      if (!r.ok) {
+        connectStatus = 'disconnected';
+        return;
+      }
+      // ping 成功 -> 触发闪动 + 标记连接
+      if (token === heartbeatToken) connectStatus = 'connected';
+      lastHeartbeatAt = Date.now();
+      heartbeatCount += 1;
+      // 同时拉告警统计, 不阻塞视觉反馈
+      try {
+        const ar = await fetch('/api/alerts?ts=' + Date.now(), { cache: 'no-store' });
+        if (token === heartbeatToken && ar.ok) {
+          const d = await ar.json();
+          const items = Array.isArray(d.alerts) ? d.alerts : [];
+          const hasError = items.some(a => a.level === 'error');
+          const hasWarn = items.some(a => a.level === 'warn');
+        }
+      } catch (_) {}
+    } catch (_) {
+      if (token === heartbeatToken) connectStatus = 'disconnected';
+    }
+  }
+
+  function startHeartbeat() {
+    if (heartbeatTimer) return;
+    sendHeartbeat();
+    heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  }
+
+  function statusTitle() {
+    const conn = connectStatus === 'connected' ? '已连接'
+              : connectStatus === 'disconnected' ? '后端不可达'
+              : '正在连接';
+    return `服务运行状态 · 心跳 ${heartbeatCount} 次 · ${conn}`;
+  }
+
+  function statusLabel() {
+    if (connectStatus === 'disconnected') return '后端断开';
+    if (connectStatus === 'unknown') return '连接中';
+    return '运行正常';
   }
 
   function compactCount(value) {
@@ -238,6 +310,7 @@
   }
 
   onMount(() => {
+    startHeartbeat();
     document.documentElement.setAttribute('data-theme', 'dark');
 
     const savedLang = localStorage.getItem('dm-lang') || 'zh';
@@ -254,6 +327,7 @@
     const alertTimer = setInterval(loadAlerts, 5000);
     return () => {
       clearInterval(alertTimer);
+      stopHeartbeat();
       detachTableDragScroll();
       window.removeEventListener('dm-alerts-refresh', loadAlerts);
       window.removeEventListener('keydown', onKeyDown);
@@ -387,9 +461,29 @@
       </button>
       <h1 class="page-title">{pageTitle}</h1>
       <div class="top-bar-right">
-        <button class="lang-toggle" onclick={toggleLang} title={lang === 'zh' ? 'Switch to English' : '切换到中文'}>
-          {lang === 'zh' ? 'EN' : '中'}
-        </button>
+        <div
+          class="sys-status"
+          class:ok={systemStatus === 'ok'}
+          class:warn={false}
+          class:err={false}
+          class:unknown={systemStatus === 'unknown'}
+          class:disconnected={systemStatus === 'disconnected'}
+          class:pulse={lastHeartbeatAt > 0}
+          style="--beat:{heartbeatCount}"
+          title={statusTitle()}
+          role="status"
+          aria-live="polite"
+          tabindex="0">
+          <!--
+            {#key heartbeatCount} 让 .sys-dot / .sys-beat 在每次心跳时重新挂载,
+            强制 CSS animation 重新播放. 仅靠 .pulse class 持续存在无法重播动画.
+          -->
+          {#key heartbeatCount}
+            <span class="sys-dot"></span>
+            <span class="sys-beat" aria-hidden="true"></span>
+          {/key}
+          <span class="sys-label">{statusLabel()}</span>
+        </div>
         <button class="alert-bell" onclick={() => { showAlerts = !showAlerts; loadAlerts(); }} title="系统告警">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           {#if alertCount > 0}
@@ -788,32 +882,122 @@
     gap: 12px;
   }
 
-  .lang-toggle {
-    display: flex;
+
+  
+  /* === 服务运行状态指示器 === */
+  .sys-status {
+    display: inline-flex;
     align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
-    border: 1px solid var(--border-primary);
-    background: var(--bg-card);
-    color: var(--text-secondary);
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .lang-toggle:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-    border-color: var(--border-focus);
-  }
-
-  .lang-toggle {
-    font-size: 12px;
+    gap: 6px;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    color: #94a3b8;
+    font-size: 11px;
     font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s;
+  }
+  .sys-status:hover { background: rgba(15, 23, 42, 0.8); border-color: rgba(34, 211, 238, 0.32); }
+  .sys-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #64748b;
+    box-shadow: 0 0 0 0 currentColor;
+    transition: all 0.2s;
+  }
+  .sys-status.ok .sys-dot { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.55); }
+  .sys-status.ok .sys-label { color: #86efac; }
+  .sys-status.warn .sys-dot { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.55); }
+  .sys-status.warn .sys-label { color: #fcd34d; }
+  .sys-status.err .sys-dot { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.7); }
+  .sys-status.err .sys-label { color: #fca5a5; }
+
+  /* 每次 .pulse 重新挂载, animation 重新播放, 实现"心跳一次闪一下" */
+  .sys-status .sys-dot { transition: box-shadow 0.2s; }
+  .sys-status.pulse .sys-dot {
+    animation: sysDotBeat 0.45s ease-out;
+  }
+  /* 在 dot 外层再画一圈环, 每次心跳扩出去一次 */
+  .sys-status { position: relative; overflow: visible; }
+  .sys-status .sys-beat {
+    position: absolute;
+    left: 10px;       /* 对齐 .sys-dot (padding-left 10px) */
+    top: 50%;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    opacity: 0;
+  }
+  .sys-status.pulse .sys-beat {
+    animation: sysBeatRing 0.7s ease-out;
+  }
+  .sys-status.ok .sys-beat { background: rgba(34, 197, 94, 0.45); }
+  .sys-status.warn .sys-beat { background: rgba(245, 158, 11, 0.45); }
+  .sys-status.err .sys-beat { background: rgba(239, 68, 68, 0.55); }
+  .sys-status.unknown .sys-beat { background: rgba(148, 163, 184, 0.45); }
+
+  @keyframes sysDotBeat {
+    0%   { transform: scale(1); filter: brightness(1); }
+    35%  { transform: scale(1.6); filter: brightness(1.5); }
+    100% { transform: scale(1); filter: brightness(1); }
+  }
+  @keyframes sysBeatRing {
+    0%   { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+    100% { transform: translate(-50%, -50%) scale(4.5); opacity: 0; }
   }
 
-  .alert-bell {
+  /* unknown (未连接) 状态: dot 慢闪, 提示正在尝试 */
+  /* disconnected 状态: 红色 + 慢闪 (不依赖 .err 的脉冲, 因为 .err 已是 error 告警) */
+  .sys-status.disconnected {
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.08);
+    animation: sysDiscoBg 1.2s ease-in-out infinite;
+  }
+  .sys-status.disconnected .sys-dot {
+    background: #ef4444;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.7);
+  }
+  @keyframes sysDiscoBg {
+    0%, 100% { background: rgba(239, 68, 68, 0.04); }
+    50%      { background: rgba(239, 68, 68, 0.18); }
+  }
+
+  .sys-status.unknown .sys-dot {
+    animation: sysDotUnknown 1.4s ease-in-out infinite;
+  }
+  @keyframes sysDotUnknown {
+    0%, 100% { opacity: 0.4; }
+    50%      { opacity: 1; }
+  }
+
+  /* err (有 error 级告警但连接正常): 暗红色稳定 */
+  .sys-status.err {
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.05);
+  }
+  .sys-status.err .sys-dot {
+    background: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.55);
+  }
+
+  /* warn (有 warning 级告警但连接正常): 暗黄色 */
+  .sys-status.warn {
+    border-color: rgba(245, 158, 11, 0.45);
+    color: #fcd34d;
+  }
+  .sys-status.warn .sys-dot {
+    background: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.55);
+  }
+.alert-bell {
     position: relative;
     display: flex;
     align-items: center;

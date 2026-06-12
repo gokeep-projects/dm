@@ -1,0 +1,6 @@
+{
+  "name": "dm",
+  "version": "0.1.0",
+  "target": "aarch64-unknown-linux-musl",
+  "binary": "dm"
+}

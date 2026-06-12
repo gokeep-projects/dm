@@ -1232,14 +1232,15 @@ pub async fn update_script(
     let script = script::find_script(&dirs, &id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if !is_user_script(&state.config, &script) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let is_user = is_user_script(&state.config, &script);
     let script_dir = script
         .path
         .parent()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some(content) = req.content {
+        if !is_user {
+            return Err(StatusCode::FORBIDDEN);
+        }
         std::fs::write(&script.path, content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     let current = script.metadata.unwrap_or(ScriptMetadata {
@@ -1738,6 +1739,12 @@ pub async fn health_check() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "timestamp": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     }))
+}
+
+/// 极轻量心跳: 不读 db, 不写日志, 不带业务逻辑, 仅用于前端可达性探测 + 渲染节拍
+#[inline]
+pub async fn ping() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ping": "pong" }))
 }
 
 #[derive(Debug, Deserialize)]

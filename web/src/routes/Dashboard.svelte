@@ -32,6 +32,32 @@
   let wsConnected = $state(false);
   let wsDestroyed = false;
   let metricHistory = $state([]);
+  const METRIC_CACHE_KEY = 'dm-dashboard-metrics-v1';
+
+  function loadCachedMetrics() {
+    try {
+      const raw = localStorage.getItem(METRIC_CACHE_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      // 只保留最近 30 分钟, 防止过期数据
+      const cutoff = Date.now() - 30 * 60 * 1000;
+      return arr.filter(p => p && p.t >= cutoff).map(normalizeMetricPoint);
+    } catch (_) { return []; }
+  }
+
+  function saveCachedMetrics() {
+    try {
+      // 缓存最近 30 分钟
+      const cutoff = Date.now() - 30 * 60 * 1000;
+      const trimmed = metricHistory.filter(p => p.t >= cutoff).slice(-360);
+      localStorage.setItem(METRIC_CACHE_KEY, JSON.stringify(trimmed));
+    } catch (_) {}
+  }
+
+  function clearCachedMetrics() {
+    try { localStorage.removeItem(METRIC_CACHE_KEY); } catch (_) {}
+  }
   let lastMetricSampleAt = 0;
   let trendMinutes = $state(3);
   let trendHover = $state(null);
@@ -282,6 +308,7 @@
       byTs.set(String(point.t), normalizeMetricPoint(point));
     }
     metricHistory = [...byTs.values()].sort((a, b) => a.t - b.t).slice(-520);
+    saveCachedMetrics();
   }
 
   function recordMetricSample(system, force = false) {
@@ -732,6 +759,12 @@
   }
 
   onMount(() => {
+    // 先把上次缓存的指标渲染出来, 避免页面刷新后图表空白
+    const cached = loadCachedMetrics();
+    if (cached.length > 0) {
+      metricHistory = cached;
+      lastUpdate = Date.now();
+    }
     loadData();
     connectDashboardWs();
     loadMetricHistory();

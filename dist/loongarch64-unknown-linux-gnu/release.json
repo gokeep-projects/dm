@@ -1,0 +1,6 @@
+{
+  "name": "dm",
+  "version": "0.1.0",
+  "target": "loongarch64-unknown-linux-gnu",
+  "binary": "dm"
+}

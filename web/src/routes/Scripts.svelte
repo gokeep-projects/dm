@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import RunDropdown from '../lib/RunDropdown.svelte';
   import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   let scripts = $state([]);
   let search = $state('');
@@ -351,7 +352,7 @@
   }
 
   async function openEditScript(script) {
-    if (!script?.user_managed) return;
+    if (!script) return;
     editingScript = script;
     editName = script.name || script.id;
     editDescription = script.description || '';
@@ -717,7 +718,9 @@
     loadFavorites();
     load();
     window.addEventListener('keydown', onGlobalKeydown);
-    return () => window.removeEventListener('keydown', onGlobalKeydown);
+    return () => {
+      window.removeEventListener('keydown', onGlobalKeydown);
+    };
   });
 </script>
 
@@ -919,31 +922,27 @@
                 title="{isFav(s.id) ? '取消收藏' : '收藏'}">
                 {isFav(s.id) ? '★' : '☆'}
               </button>
-              <button
-                class="card-run-btn"
-                onclick={(e) => { e.preventDefault(); e.stopPropagation(); openRunParams(s); }}
-                aria-label="{paramCount(s) > 0 ? '带参数执行' : '快速执行'} {s.name}"
-                title="{paramCount(s) > 0 ? '带参数执行' : '快速执行'} {s.name}">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5v14l11-7z"/>
-                </svg>
-              </button>
-              {#if s.user_managed}
+              <RunDropdown
+                script={s}
+                view="card"
+                onQuickRun={(sc) => { location.hash = '#/script/' + sc.id + '/run'; }}
+                onRunWithParams={(sc) => openRunParams(sc)} />
                 <button
                   class="card-edit-btn"
                   onclick={(e) => { e.preventDefault(); e.stopPropagation(); openEditScript(s); }}
                   aria-label="编辑 {s.name}"
-                  title="编辑脚本">
+                  title="{s.user_managed ? '编辑脚本' : '编辑元数据'}">
                   编辑
                 </button>
-                <button
-                  class="card-delete-btn"
-                  onclick={(e) => { e.preventDefault(); e.stopPropagation(); deleteScript(s); }}
-                  aria-label="删除 {s.name}"
-                  title="删除脚本">
-                  删除
-                </button>
-              {/if}
+                {#if s.user_managed}
+                  <button
+                    class="card-delete-btn"
+                    onclick={(e) => { e.preventDefault(); e.stopPropagation(); deleteScript(s); }}
+                    aria-label="删除 {s.name}"
+                    title="删除脚本">
+                    删除
+                  </button>
+                {/if}
             </div>
 
             <div class="card-body">
@@ -1061,23 +1060,18 @@
               title="{isFav(s.id) ? '取消收藏' : '收藏'}">
               {isFav(s.id) ? '★' : '☆'}
             </button>
+            <RunDropdown
+              script={s}
+              view="list"
+              onQuickRun={(sc) => { location.hash = '#/script/' + sc.id + '/run'; }}
+              onRunWithParams={(sc) => openRunParams(sc)} />
             <button
-              class="row-run-btn"
-              onclick={(e) => { e.preventDefault(); e.stopPropagation(); openRunParams(s); }}
-              aria-label="{paramCount(s) > 0 ? '带参数执行' : '执行'} {s.name} 并查看实时返回"
-              title="{paramCount(s) > 0 ? '带参数执行并查看实时返回' : '执行并查看实时返回'}">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M8 5v14l11-7z"/>
-              </svg>
-              <span>{paramCount(s) > 0 ? '参数执行' : '执行'}</span>
+              class="row-edit-btn"
+              onclick={(e) => { e.preventDefault(); e.stopPropagation(); openEditScript(s); }}
+              aria-label="编辑 {s.name}">
+              编辑
             </button>
             {#if s.user_managed}
-              <button
-                class="row-edit-btn"
-                onclick={(e) => { e.preventDefault(); e.stopPropagation(); openEditScript(s); }}
-                aria-label="编辑 {s.name}">
-                编辑
-              </button>
               <button
                 class="row-delete-btn"
                 onclick={(e) => { e.preventDefault(); e.stopPropagation(); deleteScript(s); }}
@@ -1752,6 +1746,8 @@
     transform: scale(1.08);
     box-shadow: 0 4px 14px rgba(34, 211, 238, 0.4);
   }
+
+
 
   .card-fav-btn {
     display: inline-flex;

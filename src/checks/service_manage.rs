@@ -290,12 +290,21 @@ fn collect_systemd_unit_states() -> HashMap<String, String> {
 }
 
 fn systemd_log_anomaly(unit: &str) -> (usize, String) {
-    let Some(out) = crate::checks::common::shell_output(&format!(
-        "journalctl -u {} -n 120 --no-pager -p warning..alert 2>/dev/null",
+    let cmd = format!(
+        "journalctl -u {} -n 60 --no-pager -p warning..alert --since '2 hours ago' 2>/dev/null",
         unit
-    )) else {
+    );
+    if let Some(out) = crate::checks::common::shell_output(&cmd) {
+        parse_log_anomaly(&out)
+    } else {
+        (0, String::new())
+    }
+}
+
+fn parse_log_anomaly(out: &str) -> (usize, String) {
+    if out.is_empty() {
         return (0, String::new());
-    };
+    }
     let lines: Vec<String> = out
         .lines()
         .filter(|line| {
@@ -313,6 +322,49 @@ fn systemd_log_anomaly(unit: &str) -> (usize, String) {
         .map(|line| crate::checks::common::truncate(line, 220))
         .collect();
     (lines.len(), lines.join(" | "))
+}
+
+fn collect_log_anomalies_parallel<I>(units: I) -> HashMap<String, (usize, String)>
+where
+    I: IntoIterator<Item = String>,
+{
+    let unique: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut v = Vec::new();
+        for u in units {
+            if seen.insert(u.clone()) {
+                v.push(u);
+            }
+        }
+        v
+    };
+    let n = unique.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+    let workers = n.min(8).max(1);
+    let chunk = (n + workers - 1) / workers;
+    let mut handles = Vec::with_capacity(workers);
+    for slice in unique.chunks(chunk) {
+        let s: Vec<String> = slice.to_vec();
+        handles.push(std::thread::spawn(move || {
+            let mut local = HashMap::new();
+            for u in s {
+                let v = systemd_log_anomaly(&u);
+                local.insert(u, v);
+            }
+            local
+        }));
+    }
+    let mut out = HashMap::new();
+    for h in handles {
+        if let Ok(local) = h.join() {
+            for (k, v) in local {
+                out.insert(k, v);
+            }
+        }
+    }
+    out
 }
 
 fn infer_unit_from_cgroup(content: &str) -> Option<String> {
@@ -585,15 +637,37 @@ fn process_snapshot() -> Vec<ProcessSnapshot> {
 }
 
 pub fn check() -> CheckResult {
-    let port_index = collect_listen_port_index();
-    let unit_index = collect_systemd_unit_index();
-    let unit_states = collect_systemd_unit_states();
+    // 并行拉取 port/unit/unit_state 三个独立 shell 命令
+    let (port_index, unit_index, unit_states) = std::thread::scope(|s| {
+        let p = s.spawn(|| collect_listen_port_index());
+        let u = s.spawn(|| collect_systemd_unit_index());
+        let st = s.spawn(|| collect_systemd_unit_states());
+        (
+            p.join().unwrap_or_default(),
+            u.join().unwrap_or_default(),
+            st.join().unwrap_or_default(),
+        )
+    });
+
+    let procs = process_snapshot();
+
+    // 预收集所有需要查 journal 的 unit，并行查日志
+    let mut wanted_units: Vec<String> = Vec::new();
+    let mut seen_units = std::collections::HashSet::new();
+    for proc in &procs {
+        if let Some(unit) = unit_index.get(&proc.pid) {
+            if seen_units.insert(unit.clone()) {
+                wanted_units.push(unit.clone());
+            }
+        }
+    }
+    let log_anomalies = collect_log_anomalies_parallel(wanted_units);
 
     let mut service_map: std::collections::HashMap<String, ServiceInfo> =
         std::collections::HashMap::new();
     let mut index = 0;
 
-    for proc in process_snapshot() {
+    for proc in procs {
         let (priority, category) = classify_service(&proc.name, &proc.cmd);
         let unit = unit_index.get(&proc.pid).cloned();
         let service_key = unit.clone().unwrap_or_else(|| proc.name.clone());
@@ -614,7 +688,10 @@ pub fn check() -> CheckResult {
                     .get(unit)
                     .cloned()
                     .unwrap_or_else(|| "unknown".to_string());
-                let (count, sample) = systemd_log_anomaly(unit);
+                let (count, sample) = log_anomalies
+                    .get(unit)
+                    .cloned()
+                    .unwrap_or((0, String::new()));
                 (state, count, sample)
             } else {
                 ("process-only".to_string(), 0, String::new())
